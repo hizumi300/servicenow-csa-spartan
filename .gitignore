@@ -1,0 +1,8 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Editor temp files
+*.swp
+*.swo
+*~

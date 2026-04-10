@@ -1,60 +1,27 @@
 # PersonalClaw
 
-PersonalClaw is not a separate software project.
+PersonalClaw is a minimal repository for using Codex as a personal, local, full-access agent.
 
-It is the idea that a full-access local Codex setup is already the personal agentic system I need. In that sense, this repository is not meant to grow into an OpenClaw-style implementation. It is a minimal home for the concept, the operating assumptions, and any lightweight instructions that help Codex work in the intended way.
+It is based on a simple working assumption: if Codex can read and edit local files, run shell commands, operate inside a local environment, and follow standing instructions, then the essential form of a personal local agent already exists.
 
-## Core Idea
+This repository provides a small, durable framing layer for that use case.
 
-If an AI agent can already:
-- read and edit local files,
-- run shell commands,
-- operate with full access inside my environment,
-- and follow my personal instructions,
-
-then the essential form of a personal local agent already exists.
-
-For my use case, Codex is that system.
-
-## Why This Is Not OpenClaw
-
-OpenClaw is interesting as a general agentic framework, but PersonalClaw does not need to reimplement that idea.
-
-The point here is simpler:
-- local environment,
-- full access,
-- personal context,
-- direct execution.
-
-That is enough.
-
-## What This Repository Is
+## Purpose
 
 This repository is intentionally small.
 
-It may contain:
-- a short project definition,
-- operating principles,
-- personal instructions for Codex,
-- lightweight notes or conventions.
+- `README.md` states the idea for humans.
+- `AGENTS.md` gives Codex the standing operating frame.
+- Anything else has to earn its place.
 
-It does not need to contain a large codebase in order to be complete.
+PersonalClaw is not intended to grow into a separate platform by default. It is a control surface for using Codex deliberately.
 
-## How To Use It
+## Scope
 
-Use this repository with Codex as a persistent framing layer.
+PersonalClaw is aimed at local, attended use.
 
-Instead of re-explaining the same intent at the beginning of every session, keep the standing assumptions in `AGENTS.md` and let the repository carry that context forward.
+It does not try to reproduce larger agent systems or always-on chat-connected platforms.
 
-In practice, that means:
-- `README.md` defines the idea for humans,
-- `AGENTS.md` defines the standing instructions for Codex,
-- new files should be added only when they materially improve actual use.
+Systems such as OpenClaw may make sense when channels, always-on automation, or broader agent infrastructure are required.
 
-## Working Assumption For Codex
-
-When interacting with this repository, treat PersonalClaw as:
-
-"a personal, local, full-access Codex-based agent environment, not a separate platform to be built."
-
-The repository is minimal by design. Its value is in the framing, not in implementation volume.
+PersonalClaw starts from a narrower assumption: for a large share of personal workflows, the local agent that already exists is enough.

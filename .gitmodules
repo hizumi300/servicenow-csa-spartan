@@ -1,3 +1,4 @@
 [submodule "codex"]
+	# Pinned in the parent repo at 8035cb03f1a5061d0342cb8fa3a10a18068ca683.
 	path = codex
 	url = https://github.com/openai/codex

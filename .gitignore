@@ -6,3 +6,6 @@
 *.swp
 *.swo
 *~
+
+# CSA Spartan runtime cache/state
+.csa_spartan/

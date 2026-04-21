@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CSA Spartan Master</title>
+    <meta
+      name="description"
+      content="ServiceNow CSA向けに1434問から600問へ圧縮した、2週間スパルタ学習アプリ。"
+    >
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">CSA Spartan Master</p>
+          <h1>2週間で叩き込む、600問の高頻出バンク</h1>
+          <p class="hero-text">
+            1434問から、試験配分と学習効率を優先して600問に圧縮。
+            1日2-3時間でも回るように、再出題と模試を先に設計してあります。
+          </p>
+          <div class="hero-actions">
+            <button id="start-sprint" class="primary-button">14日スプリント開始</button>
+            <button id="reset-progress" class="ghost-button">進捗リセット</button>
+          </div>
+        </div>
+        <div class="hero-grid">
+          <article class="stat-card accent">
+            <span class="stat-label">厳選問題数</span>
+            <strong id="stat-curated">600</strong>
+            <small>試験配分準拠</small>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">学習期間</span>
+            <strong id="stat-days">14日</strong>
+            <small>1日2-3時間</small>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">今日の目標</span>
+            <strong id="stat-today">-</strong>
+            <small id="stat-today-sub">Day 1を始めろ</small>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">推定合格率</span>
+            <strong id="stat-pass">-</strong>
+            <small id="stat-pass-sub">まだ戦績不足</small>
+          </article>
+        </div>
+      </header>
+
+      <nav class="tab-bar" aria-label="Main sections">
+        <button class="tab-button active" data-view="dashboard">司令塔</button>
+        <button class="tab-button" data-view="drill">スパルタドリル</button>
+        <button class="tab-button" data-view="mock">60問模試</button>
+        <button class="tab-button" data-view="plan">14日計画</button>
+      </nav>
+
+      <main>
+        <section id="view-dashboard" class="view active">
+          <div class="grid-two">
+            <article class="panel">
+              <div class="panel-head">
+                <h2>今日の指示</h2>
+                <span id="today-badge" class="pill">未開始</span>
+              </div>
+              <div id="today-card" class="stack"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h2>次に殴る問題</h2>
+                <button id="jump-next" class="mini-button">今すぐ解く</button>
+              </div>
+              <div id="next-preview" class="stack"></div>
+            </article>
+          </div>
+
+          <div class="grid-two">
+            <article class="panel">
+              <div class="panel-head">
+                <h2>ドメイン別進捗</h2>
+                <span id="reviewed-count" class="muted"></span>
+              </div>
+              <div id="domain-progress" class="stack"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h2>選抜ロジック</h2>
+              </div>
+              <ul id="selection-policy" class="plain-list"></ul>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-drill" class="view">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>スパルタドリル</h2>
+              <span id="drill-status" class="pill">Mixed</span>
+            </div>
+            <div class="controls">
+              <label class="field">
+                <span>出題モード</span>
+                <select id="drill-mode">
+                  <option value="mixed">全範囲</option>
+                  <option value="focus">分野集中</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>集中分野</span>
+                <select id="domain-filter"></select>
+              </label>
+              <button id="load-question" class="primary-button small">次の問題を出せ</button>
+            </div>
+          </article>
+
+          <article class="panel question-panel">
+            <div id="question-meta" class="question-meta"></div>
+            <div id="question-card" class="question-card empty">
+              <p>出題ボタンを押せ。逃げるな。</p>
+            </div>
+            <div class="question-actions">
+              <button id="hint-button" class="ghost-button small" disabled>ヒントを出せ</button>
+              <button id="submit-answer" class="primary-button small" disabled>採点する</button>
+              <button id="next-question" class="ghost-button small" disabled>次へ</button>
+            </div>
+            <div id="hint-box" class="hint-box hidden"></div>
+            <div id="result-box" class="result-box hidden"></div>
+          </article>
+        </section>
+
+        <section id="view-mock" class="view">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>60問模試</h2>
+              <span id="mock-timer" class="pill warning">90:00</span>
+            </div>
+            <p class="muted">
+              本番想定。60問、90分。ヒントなし。終わったら弱点だけを再度殴る。
+            </p>
+            <div class="controls">
+              <button id="start-mock" class="primary-button">模試を開始</button>
+              <button id="finish-mock" class="ghost-button">模試を終了</button>
+            </div>
+          </article>
+
+          <article class="panel question-panel">
+            <div id="mock-progress" class="question-meta"></div>
+            <div id="mock-question" class="question-card empty">
+              <p>まだ始まっていない。始めろ。</p>
+            </div>
+            <div class="question-actions">
+              <button id="mock-prev" class="ghost-button small" disabled>前へ</button>
+              <button id="mock-save" class="primary-button small" disabled>回答を保存</button>
+              <button id="mock-next" class="ghost-button small" disabled>次へ</button>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h2>模試結果</h2>
+            </div>
+            <div id="mock-results" class="stack muted">
+              <p>模試を完了すると、ここに結果が出る。</p>
+            </div>
+          </article>
+        </section>
+
+        <section id="view-plan" class="view">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>14日スパルタ計画</h2>
+              <span id="plan-summary" class="muted"></span>
+            </div>
+            <div id="plan-grid" class="plan-grid"></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

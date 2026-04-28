@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import html
+import os
 import json
 import math
 import random
@@ -12,9 +14,12 @@ import subprocess
 import sys
 import unicodedata
 from datetime import datetime, timedelta
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.parse import quote_plus
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.request import Request, urlopen
 
 import numpy as np
 import torch
@@ -31,10 +36,28 @@ STATE_PATH = RUNTIME_DIR / "state.json"
 CURATED_PATH = RUNTIME_DIR / "curated_600.json"
 SHADOW_DIR = RUNTIME_DIR / "shadow"
 SHADOW_REPORT_PATH = SHADOW_DIR / "shadow_report.json"
+SHADOW_PROMOTION_PATH = SHADOW_DIR / "shadow_promotion.json"
+DOCS_CACHE_PATH = RUNTIME_DIR / "official_docs_cache.json"
 DOCS_DIR = ROOT / "docs"
 WEB_DATA_DIR = DOCS_DIR / "data"
 WEB_DATA_PATH = WEB_DATA_DIR / "csa600.json"
 DEFAULT_SOURCE = Path.home() / "ServiseNow-CSA-Questions.rtfd" / "TXT.rtf"
+OFFICIAL_DOCS_SEARCH_API = "https://www.servicenow.com/docs/api/khub/clustered-search"
+OFFICIAL_DOCS_SEARCH_PAGE = "https://www.servicenow.com/docs/search"
+OFFICIAL_DOCS_CACHE_TTL_HOURS = 18
+OFFICIAL_DOCS_RELEASE_PRIORITY = {
+    "australia": 6,
+    "latest": 5,
+    "zurich": 4,
+    "yokohama": 3,
+    "xanadu": 2,
+    "washingtondc": 1,
+}
+DEFAULT_EMBEDDING_MODEL = os.environ.get(
+    "CSA_EMBEDDING_MODEL",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+)
+EMBEDDING_BATCH_SIZE = int(os.environ.get("CSA_EMBEDDING_BATCH_SIZE", "32"))
 
 HEADING_RE = re.compile(r"^(Question|問題)\s*(\d+)$")
 URL_RE = re.compile(r"https?://\S+")
@@ -1645,6 +1668,292 @@ def docs_for_question(question: Dict[str, object]) -> List[str]:
     return [docs_search_url(topic) for topic in deduped[:2]]
 
 
+def load_json_cache(path: Path) -> Dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_json_cache(path: Path, payload: Dict[str, object]) -> None:
+    ensure_runtime_dir()
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def iso_age_hours(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        then = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return (now_local() - then).total_seconds() / 3600.0
+
+
+def strip_html_tags(text: str) -> str:
+    text = html.unescape(text or "")
+    text = re.sub(r"<span[^>]*class=\"kwicmatch\"[^>]*>", "", text)
+    text = re.sub(r"<span[^>]*class=\"kwicstring\"[^>]*>", "", text)
+    text = re.sub(r"<span[^>]*class=\"kwictruncate\"[^>]*>", "…", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return normalize_text(text)
+
+
+def question_domain_key(question_like: Dict[str, object]) -> str:
+    return str(question_like.get("domain_key") or question_like.get("top_domain") or "")
+
+
+def english_search_term(term: str) -> str:
+    term = normalize_text(term)
+    for tag, label in CONCEPT_LABELS_JA.items():
+        if term == label:
+            return tag.replace("_", " ")
+    for tag, label in CURRENT_SERVICE_LABELS_JA.items():
+        if term == label:
+            return tag.replace("_", " ")
+    for meta in TOP_DOMAINS.values():
+        if term == meta["label_ja"]:
+            return meta["label"]
+    return term
+
+
+def official_doc_query_from_basis(question_like: Dict[str, object]) -> str:
+    basis = question_like.get("doc_basis") or {}
+    if not isinstance(basis, dict):
+        basis = {}
+    basis_terms = [english_search_term(str(term)) for term in basis.get("basis_terms", []) if term]
+    primary = english_search_term(str(basis.get("primary_topic") or ""))
+    secondary = [english_search_term(str(term)) for term in basis.get("secondary_topics", []) if term]
+    release_labels = [
+        tag.replace("_", " ")
+        for tag in question_like.get("current_service_tags", [])[:2]
+        if isinstance(tag, str)
+    ]
+
+    generic_topics = {
+        "Platform Overview & Navigation",
+        "Instance Configuration",
+        "Configuring Applications for Collaboration",
+        "Self Service & Automation",
+        "Database Management & Platform Security",
+        "Data Migration & Integration",
+        "プラットフォーム概要とナビゲーション",
+        "インスタンス構成",
+        "コラボレーション用アプリケーション構成",
+        "セルフサービスと自動化",
+        "データベース管理とプラットフォームセキュリティ",
+        "データ移行と統合",
+    }
+    query_parts: List[str] = []
+    if primary:
+        query_parts.append(primary)
+    if basis.get("basis_type") == "confusion_family":
+        query_parts.extend(basis_terms[1:4])
+    elif primary in generic_topics:
+        query_parts.extend(basis_terms[1:3] + release_labels[:1])
+    else:
+        query_parts.extend(secondary[:2])
+    for part in basis_terms:
+        if len(query_parts) >= 4:
+            break
+        if part not in query_parts:
+            query_parts.append(part)
+    return " ".join(dedupe_preserve_order([part for part in query_parts if part])).strip()
+
+
+def normalize_official_family(value: str) -> str:
+    return normalize_key(value).replace(" ", "")
+
+
+def metadata_values(item: Dict[str, object]) -> Dict[str, List[str]]:
+    values: Dict[str, List[str]] = {}
+    for entry in item.get("metadata", []) or []:
+        key = entry.get("key")
+        raw_values = entry.get("values") or []
+        if not key:
+            continue
+        values[str(key)] = [normalize_text(str(value)) for value in raw_values if value is not None]
+    return values
+
+
+def flatten_official_search_result(payload: Dict[str, object]) -> List[Dict[str, object]]:
+    candidates: List[Dict[str, object]] = []
+    for cluster in payload.get("results", []) or []:
+        for entry in cluster.get("entries", []) or []:
+            item = (
+                entry.get("topic")
+                or entry.get("map")
+                or entry.get("document")
+                or entry.get("unstructuredDocument")
+                or entry.get("htmlPackage")
+                or {}
+            )
+            meta = metadata_values(item)
+            candidates.append(
+                {
+                    "type": entry.get("type") or item.get("editorialType"),
+                    "title": normalize_text(item.get("title") or ""),
+                    "url": item.get("readerUrl") or item.get("documentUrl") or item.get("topicUrl") or item.get("url"),
+                    "excerpt": strip_html_tags(item.get("htmlExcerpt") or item.get("excerpt") or ""),
+                    "family": [normalize_official_family(value) for value in meta.get("family", []) if value],
+                    "product_name": meta.get("product_name", []),
+                    "doc_type": meta.get("ft:document_type", [])[:1],
+                    "updated_on": (
+                        meta.get("ft:lastTechChange", [])[:1]
+                        or meta.get("ft:lastEdition", [])[:1]
+                        or meta.get("ft:lastPublication", [])[:1]
+                    ),
+                    "metadata": meta,
+                }
+            )
+    return candidates
+
+
+def score_official_doc_candidate(
+    candidate: Dict[str, object],
+    query: str,
+    question_like: Dict[str, object],
+) -> float:
+    basis = question_like.get("doc_basis") or {}
+    basis_terms = [normalize_key(term) for term in basis.get("basis_terms", []) if term]
+    title_key = normalize_key(candidate.get("title") or "")
+    excerpt_key = normalize_key(candidate.get("excerpt") or "")
+    url_key = normalize_key(candidate.get("url") or "")
+    query_terms = [term for term in lexical_tokens(query) if len(term) >= 3][:8]
+
+    score = 0.0
+    families = candidate.get("family", []) or []
+    if families:
+        score += max(OFFICIAL_DOCS_RELEASE_PRIORITY.get(family, 0) for family in families) * 9.0
+    if candidate.get("type") == "TOPIC":
+        score += 16.0
+    elif candidate.get("type") == "MAP":
+        score -= 4.0
+    if any("api reference" in normalize_key(name) for name in candidate.get("product_name", [])):
+        score -= 12.0
+    if "api-reference" in url_key:
+        score -= 10.0
+    if "workflow studio" in normalize_key(query) and "classic workflow" in title_key:
+        score -= 8.0
+    title_hits = sum(1 for term in query_terms if term in title_key)
+    excerpt_hits = sum(1 for term in query_terms if term in excerpt_key)
+    basis_hits = sum(1 for term in basis_terms if term and (term in title_key or term in excerpt_key or term in url_key))
+    score += title_hits * 6.0
+    score += excerpt_hits * 2.4
+    score += basis_hits * 4.0
+    if basis.get("primary_topic") and normalize_key(str(basis["primary_topic"])) in title_key:
+        score += 12.0
+    if candidate.get("excerpt"):
+        score += min(8.0, len(candidate["excerpt"]) / 42.0)
+    return score
+
+
+def official_doc_search_request(query: str) -> Dict[str, object]:
+    return {
+        "query": query,
+        "clusterSortCriterions": [{"key": "family"}],
+        "metadataFilters": [],
+        "facets": [{"id": "family"}, {"id": "media"}, {"id": "product_name"}],
+        "sort": [],
+        "sortId": None,
+        "paging": {"page": 1, "perPage": 8},
+        "keywordMatch": None,
+        "contentLocale": "en-US",
+        "virtualField": "EVERYWHERE",
+        "scope": "DEFAULT",
+    }
+
+
+def search_official_docs_live(query: str) -> Dict[str, object]:
+    request = Request(
+        OFFICIAL_DOCS_SEARCH_API,
+        data=json.dumps(official_doc_search_request(query)).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
+    with urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def resolve_official_doc_evidence(
+    question_like: Dict[str, object],
+    *,
+    force_refresh: bool = False,
+    memory_cache: Optional[Dict[str, Dict[str, object]]] = None,
+) -> Optional[Dict[str, object]]:
+    query = official_doc_query_from_basis(question_like)
+    if not query:
+        return None
+
+    cache_key = normalize_key(query)
+    if memory_cache is not None and cache_key in memory_cache and not force_refresh:
+        return memory_cache[cache_key]
+
+    cache = load_json_cache(DOCS_CACHE_PATH)
+    cached = cache.get(cache_key)
+    if (
+        not force_refresh
+        and isinstance(cached, dict)
+        and (age_hours := iso_age_hours(cached.get("fetched_at"))) is not None
+        and age_hours <= OFFICIAL_DOCS_CACHE_TTL_HOURS
+    ):
+        if memory_cache is not None:
+            memory_cache[cache_key] = cached
+        return cached
+
+    try:
+        payload = search_official_docs_live(query)
+        candidates = flatten_official_search_result(payload)
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+        if isinstance(cached, dict):
+            return cached
+        return None
+
+    if not candidates:
+        return None
+
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: (
+            score_official_doc_candidate(candidate, query, question_like),
+            candidate.get("title") or "",
+        ),
+        reverse=True,
+    )
+    chosen = ranked[0]
+    evidence = {
+        "source": "servicenow-fluidtopics-live",
+        "query": query,
+        "title": chosen.get("title"),
+        "url": chosen.get("url") or f"{OFFICIAL_DOCS_SEARCH_PAGE}?q={quote_plus(query)}",
+        "snippet": chosen.get("excerpt") or "",
+        "release_family": (chosen.get("family") or ["unknown"])[0],
+        "product_name": (chosen.get("product_name") or [chosen.get("title") or ""])[0],
+        "document_type": (chosen.get("doc_type") or [chosen.get("type") or "unknown"])[0],
+        "updated_on": (chosen.get("updated_on") or [None])[0],
+        "score": round(score_official_doc_candidate(chosen, query, question_like), 2),
+        "fetched_at": iso_now(),
+        "alternatives": [
+            {
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "release_family": (item.get("family") or ["unknown"])[0],
+            }
+            for item in ranked[1:3]
+            if item.get("url")
+        ],
+    }
+    cache[cache_key] = evidence
+    save_json_cache(DOCS_CACHE_PATH, cache)
+    if memory_cache is not None:
+        memory_cache[cache_key] = evidence
+    return evidence
+
+
 def concept_label_ja(tag: str) -> str:
     return CONCEPT_LABELS_JA.get(tag, tag.replace("_", " "))
 
@@ -1956,6 +2265,52 @@ def normalize_embedding_rows(matrix: np.ndarray) -> np.ndarray:
     return matrix / norms
 
 
+_SENTENCE_MODEL = None
+
+
+def load_sentence_embedding_model():
+    global _SENTENCE_MODEL
+    if _SENTENCE_MODEL is not None:
+        return _SENTENCE_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer
+    except Exception:
+        _SENTENCE_MODEL = False
+        return None
+    try:
+        _SENTENCE_MODEL = SentenceTransformer(DEFAULT_EMBEDDING_MODEL)
+    except Exception:
+        _SENTENCE_MODEL = False
+        return None
+    return _SENTENCE_MODEL
+
+
+def build_external_sentence_embeddings(
+    bucket: Sequence[Dict[str, object]],
+    enrichments: Dict[str, Dict[str, object]],
+) -> Tuple[Optional[np.ndarray], Dict[str, object]]:
+    model = load_sentence_embedding_model()
+    if model is None:
+        return None, {"provider": "unavailable", "model": DEFAULT_EMBEDDING_MODEL}
+
+    texts = [embedding_source_text(question, enrichments[question["id"]]) for question in bucket]
+    vectors = model.encode(
+        texts,
+        batch_size=EMBEDDING_BATCH_SIZE,
+        show_progress_bar=False,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    )
+    dense = np.asarray(vectors, dtype=float)
+    if dense.ndim != 2 or dense.shape[0] != len(bucket):
+        return None, {"provider": "failed", "model": DEFAULT_EMBEDDING_MODEL}
+    return dense, {
+        "provider": "sentence-transformers",
+        "model": DEFAULT_EMBEDDING_MODEL,
+        "dimensions": int(dense.shape[1]),
+    }
+
+
 def build_bucket_embeddings(
     bucket: Sequence[Dict[str, object]],
     enrichments: Dict[str, Dict[str, object]],
@@ -1999,11 +2354,25 @@ def build_bucket_embeddings(
         explained = 1.0
 
     dense = normalize_embedding_rows(np.asarray(dense, dtype=float))
+    external_dense, external_meta = build_external_sentence_embeddings(bucket, enrichments)
+    method = "tfidf_word_char_svd_embedding"
+    external_model = None
+    external_provider = None
+    if external_dense is not None:
+        local_weight = 0.34
+        external_weight = 0.66
+        dense = np.concatenate([dense * local_weight, external_dense * external_weight], axis=1)
+        dense = normalize_embedding_rows(dense)
+        method = "sentence_transformer_plus_tfidf_svd_hybrid"
+        external_model = external_meta.get("model")
+        external_provider = external_meta.get("provider")
     vectors = {question["id"]: dense[index] for index, question in enumerate(bucket)}
     meta = {
-        "method": "tfidf_word_char_svd_embedding",
+        "method": method,
         "dimensions": int(dense.shape[1]),
         "variance_explained": round(explained, 4),
+        "external_provider": external_provider,
+        "external_model": external_model,
     }
     return vectors, meta
 
@@ -2211,11 +2580,11 @@ def build_semantic_cluster_metadata(
         bucket_key = (question["top_domain"], int(question.get("choose_count", 1)))
         by_bucket.setdefault(bucket_key, []).append(question)
 
-    embedding_meta: Dict[str, object] = {}
+    embedding_metas: List[Dict[str, object]] = []
     for bucket in by_bucket.values():
         ordered = sorted(bucket, key=lambda item: item["global_index"])
         vectors, meta = build_bucket_embeddings(ordered, enrichments)
-        embedding_meta = meta
+        embedding_metas.append(meta)
         for question in ordered:
             enrichments[question["id"]]["embedding_vector"] = vectors[question["id"]]
         for index, left_question in enumerate(ordered):
@@ -2268,6 +2637,10 @@ def build_semantic_cluster_metadata(
                 "semantic_similarity_to_anchor": round(similarity_to_anchor, 3),
                 "embedding_similarity_to_anchor": round(float(embedding_similarity_to_anchor), 3),
             }
+    embedding_meta = next(
+        (meta for meta in reversed(embedding_metas) if meta.get("external_provider") or meta.get("method")),
+        {},
+    )
     summary = {
         "cluster_count": cluster_count,
         "question_count": cluster_question_count,
@@ -2275,6 +2648,8 @@ def build_semantic_cluster_metadata(
         "embedding_method": embedding_meta.get("method", "unknown"),
         "embedding_dimensions": embedding_meta.get("dimensions", 0),
         "embedding_variance_explained": embedding_meta.get("variance_explained", 0.0),
+        "external_provider": embedding_meta.get("external_provider"),
+        "external_model": embedding_meta.get("external_model"),
     }
     return metadata, summary
 
@@ -2672,9 +3047,25 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
         active_band_lookup[item["question"]["id"]] = band
 
     selected_questions = []
+    live_doc_cache: Dict[str, Dict[str, object]] = {}
+    live_doc_hits = 0
     for curated_index, item in enumerate(selected, start=1):
         question = item["question"]
         explanation = build_explanation_ja(question, item["adaptive_tags"], item["release_tags"])
+        question_like = {
+            "id": question["id"],
+            "domain_key": question["top_domain"],
+            "doc_basis": item["doc_basis"],
+            "current_service_tags": item["release_tags"],
+            "confusion_family": item["confusion_family"],
+        }
+        official_doc_evidence = resolve_official_doc_evidence(question_like, memory_cache=live_doc_cache)
+        if official_doc_evidence:
+            live_doc_hits += 1
+        docs_links = dedupe_preserve_order(
+            ([official_doc_evidence["url"]] if official_doc_evidence and official_doc_evidence.get("url") else [])
+            + docs_for_question(question)
+        )
         selected_questions.append(
             {
                 "curated_index": curated_index,
@@ -2709,7 +3100,8 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "original_explanation": question["overall_explanation"],
                 "root_snippet": item["root_snippet"],
                 "doc_basis": item["doc_basis"],
-                "docs": docs_for_question(question),
+                "docs": docs_links,
+                "official_doc_evidence": official_doc_evidence,
                 "yield_score": round(item["score"], 2),
                 "yield_reasons": item["reasons"],
                 "topic_tags": item["topic_tags"],
@@ -2754,6 +3146,12 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
             }
         )
 
+    shadow_promotion = load_shadow_promotion()
+    shadow_runtime = shadow_promotion.get("question_runtime", {}) if isinstance(shadow_promotion, dict) else {}
+    for question in selected_questions:
+        if question["id"] in shadow_runtime:
+            question["shadow_runtime"] = shadow_runtime[question["id"]]
+
     confusion_counts_raw: Dict[str, int] = {}
     confusion_counts_curated: Dict[str, int] = {}
     for item in scored:
@@ -2796,6 +3194,7 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
             "高品質バンク・学習領域メタデータ・解説の厚さを優先",
             "署名ベース完全重複は1代表に抑え、TF-IDF + SVD 埋め込みで意味近似クラスタを作る",
             "混同しやすい概念セットと2026年4月時点の現行ServiceNow文脈に追加加点",
+            "公式Docs根拠は ServiceNow Fluid Topics の live 検索APIで更新し、静的メタ情報だけに依存しない",
             "600問は上限プールとし、実運用のアクティブ学習セットは420〜560問、初期推奨は480問",
             "2週間・1日2-3時間で回せるよう、複数選択と弱点化しやすい論点を少し厚めに採用",
         ],
@@ -2843,6 +3242,29 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "working_set_size",
             ],
         },
+        "shadow_model": (
+            {
+                "generated_at": shadow_promotion.get("generated_at"),
+                "promoted": bool(shadow_promotion.get("promoted")),
+                "promotion_reason": shadow_promotion.get("promotion_reason"),
+                "active_model": shadow_promotion.get("active_model"),
+                "baseline_model": shadow_promotion.get("baseline_model"),
+                "champion_model": shadow_promotion.get("champion_model"),
+                "valid_examples": shadow_promotion.get("valid_examples"),
+                "metrics": shadow_promotion.get("metrics"),
+            }
+            if isinstance(shadow_promotion, dict)
+            else {
+                "generated_at": None,
+                "promoted": False,
+                "promotion_reason": "shadow training 未実行",
+                "active_model": "baseline",
+                "baseline_model": "baseline",
+                "champion_model": "baseline",
+                "valid_examples": 0,
+                "metrics": None,
+            }
+        ),
         "meta": {
             "curated_count": len(selected_questions),
             "curated_cap": count,
@@ -2856,6 +3278,13 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
             },
             "confusion_family_counts_raw": confusion_counts_raw,
             "confusion_family_counts_curated": confusion_counts_curated,
+            "official_doc_live": {
+                "provider": "servicenow-fluidtopics-live",
+                "cache_ttl_hours": OFFICIAL_DOCS_CACHE_TTL_HOURS,
+                "questions_with_live_evidence": live_doc_hits,
+                "unique_queries_resolved": len(live_doc_cache),
+                "search_api": OFFICIAL_DOCS_SEARCH_API,
+            },
         },
         "domains": domain_inventory,
         "plan": plan,
@@ -2872,6 +3301,16 @@ def load_curated_payload() -> Dict[str, object]:
     if not CURATED_PATH.exists():
         raise SystemExit("先に `python3 csa_spartan.py curate` を実行してください。")
     return json.loads(CURATED_PATH.read_text(encoding="utf-8"))
+
+
+def load_shadow_promotion() -> Optional[Dict[str, object]]:
+    if not SHADOW_PROMOTION_PATH.exists():
+        return None
+    try:
+        payload = json.loads(SHADOW_PROMOTION_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def export_web_data(curated: Dict[str, object]) -> None:
@@ -3042,11 +3481,17 @@ class ShadowSAKTModel(torch.nn.Module):
         )
         self.output = torch.nn.Linear(hidden_size, 1)
 
-    def forward(self, interaction: torch.Tensor, target_q: torch.Tensor) -> torch.Tensor:
+    def forward(self, interaction: torch.Tensor, target_q: torch.Tensor, *, full_context: bool = False) -> torch.Tensor:
         memory = self.interaction_embedding(interaction)
         query = self.question_embedding(target_q)
         seq_len = interaction.size(1)
-        causal_mask = torch.triu(torch.ones((seq_len, seq_len), device=interaction.device, dtype=torch.bool), diagonal=1)
+        target_len = target_q.size(1)
+        causal_mask = None
+        if not full_context:
+            causal_mask = torch.triu(
+                torch.ones((target_len, seq_len), device=interaction.device, dtype=torch.bool),
+                diagonal=1,
+            )
         attended, _ = self.attention(query, memory, memory, attn_mask=causal_mask)
         hidden = self.norm(attended + self.ff(attended))
         return self.output(hidden).squeeze(-1)
@@ -3167,6 +3612,7 @@ def train_shadow_model(
                 "selection_score": score,
                 "metrics": metrics,
                 "history": list(history),
+                "state_dict": {key: value.detach().cpu().clone() for key, value in model.state_dict().items()},
             }
 
     if best_snapshot is None:
@@ -3174,11 +3620,146 @@ def train_shadow_model(
             "selection_score": 0.0,
             "metrics": {"accuracy": 0.0, "brier": 0.0, "log_loss": 0.0, "auc": None},
             "history": history,
+            "state_dict": {key: value.detach().cpu().clone() for key, value in model.state_dict().items()},
         }
     return {
         "model": model_kind,
         "metrics": best_snapshot["metrics"],
         "history": best_snapshot["history"][-5:],
+        "hidden_size": hidden_size,
+        "state_dict": best_snapshot["state_dict"],
+    }
+
+
+def instantiate_shadow_model(model_kind: str, num_questions: int, hidden_size: int) -> torch.nn.Module:
+    if model_kind == "dkt":
+        return ShadowDKTModel(num_questions, hidden_size)
+    if model_kind == "sakt":
+        return ShadowSAKTModel(num_questions, hidden_size)
+    raise SystemExit(f"Unsupported shadow model: {model_kind}")
+
+
+def load_trained_shadow_model(model_result: Dict[str, object], num_questions: int) -> torch.nn.Module:
+    model = instantiate_shadow_model(str(model_result["model"]), num_questions, int(model_result["hidden_size"]))
+    model.load_state_dict(model_result["state_dict"])
+    model.eval()
+    return model
+
+
+def latest_shadow_context(attempts: Sequence[Dict[str, object]], window: int) -> List[Dict[str, object]]:
+    if not attempts:
+        return []
+    return list(attempts[-max(1, window) :])
+
+
+def predict_shadow_probabilities(
+    model_result: Dict[str, object],
+    attempts: Sequence[Dict[str, object]],
+    num_questions: int,
+    window: int,
+) -> List[float]:
+    context = latest_shadow_context(attempts, window)
+    if not context:
+        return [0.58] * num_questions
+    model = load_trained_shadow_model(model_result, num_questions)
+    interaction = torch.zeros((1, len(context)), dtype=torch.long)
+    for col, attempt in enumerate(context):
+        qid = int(attempt["question_index"])
+        resp = int(attempt["correct"])
+        interaction[0, col] = qid + 1 + resp * num_questions
+    with torch.no_grad():
+        if model_result["model"] == "dkt":
+            logits_all = model(interaction)
+            logits = logits_all[0, -1, 1 : num_questions + 1]
+            probs = torch.sigmoid(logits).cpu().numpy().tolist()
+        else:
+            target_q = torch.arange(1, num_questions + 1, dtype=torch.long).unsqueeze(0)
+            logits = model(interaction, target_q, full_context=True)[0]
+            probs = torch.sigmoid(logits).cpu().numpy().tolist()
+    return [float(max(0.03, min(0.99, prob))) for prob in probs]
+
+
+def shadow_model_should_promote(champion: Dict[str, object], baseline: Dict[str, object], valid_examples: int) -> Tuple[bool, str]:
+    if champion["model"] == "baseline":
+        return False, "champion が baseline のまま"
+    if valid_examples < 6:
+        return False, "validation 例が少なすぎる"
+    base_auc = baseline["metrics"]["auc"] or 0.0
+    champ_auc = champion["metrics"]["auc"] or 0.0
+    base_log = baseline["metrics"]["log_loss"]
+    champ_log = champion["metrics"]["log_loss"]
+    base_brier = baseline["metrics"]["brier"]
+    champ_brier = champion["metrics"]["brier"]
+    if champ_auc >= base_auc + 0.02 and champ_brier <= base_brier + 0.01:
+        return True, "AUC と Brier で baseline を上回った"
+    if champ_log <= base_log * 0.97 and champ_brier <= base_brier + 0.01:
+        return True, "log loss で baseline を明確に改善した"
+    return False, "baseline 超えが統計的に弱い"
+
+
+def build_shadow_promotion(
+    curated: Dict[str, object],
+    attempts: Sequence[Dict[str, object]],
+    baseline: Dict[str, object],
+    champion: Dict[str, object],
+    valid_examples: int,
+    window: int,
+) -> Dict[str, object]:
+    num_questions = len(curated["questions"])
+    promoted, reason = shadow_model_should_promote(champion, baseline, valid_examples)
+    active_model = champion if promoted else baseline
+    question_probs = (
+        predict_shadow_probabilities(active_model, attempts, num_questions, window)
+        if active_model["model"] != "baseline"
+        else None
+    )
+    if question_probs is None:
+        support_by_q: Dict[str, int] = {}
+        success_by_q: Dict[str, int] = {}
+        for attempt in attempts:
+            question = curated["questions"][int(attempt["question_index"])]
+            support_by_q[question["id"]] = support_by_q.get(question["id"], 0) + 1
+            success_by_q[question["id"]] = success_by_q.get(question["id"], 0) + int(attempt["correct"])
+        question_probs = []
+        for question in curated["questions"]:
+            support = support_by_q.get(question["id"], 0)
+            success = success_by_q.get(question["id"], 0)
+            prob = (success + 1.0) / (support + 2.0) if support else 0.58
+            question_probs.append(float(prob))
+
+    support_counts: Dict[str, int] = {}
+    for attempt in attempts:
+        question = curated["questions"][int(attempt["question_index"])]
+        support_counts[question["id"]] = support_counts.get(question["id"], 0) + 1
+
+    question_runtime: Dict[str, Dict[str, object]] = {}
+    for question in curated["questions"]:
+        prob = question_probs[question["curated_index"] - 1]
+        support = support_counts.get(question["id"], 0)
+        uncertainty = 1 / math.sqrt(support + 1)
+        opportunity = max(0.0, min(1.35, 1 - abs(prob - 0.62) / 0.62 + uncertainty * 0.22 + (1 - prob) * 0.12))
+        question_runtime[question["id"]] = {
+            "model": active_model["model"],
+            "predicted_success": round(prob, 4),
+            "uncertainty": round(uncertainty, 4),
+            "opportunity": round(float(opportunity), 4),
+            "support": support,
+            "promoted": promoted,
+        }
+
+    return {
+        "generated_at": iso_now(),
+        "promoted": promoted,
+        "promotion_reason": reason,
+        "active_model": active_model["model"],
+        "baseline_model": baseline["model"],
+        "champion_model": champion["model"],
+        "valid_examples": valid_examples,
+        "question_runtime": question_runtime,
+        "metrics": {
+            "baseline": baseline["metrics"],
+            "champion": champion["metrics"],
+        },
     }
 
 
@@ -3211,6 +3792,10 @@ def run_shadow_training(
             item["metrics"]["auc"] if item["metrics"]["auc"] is not None else -item["metrics"]["log_loss"]
         ),
     )
+    serializable_models = [
+        {key: value for key, value in item.items() if key != "state_dict"}
+        for item in [baseline, dkt, sakt]
+    ]
     report = {
         "built_at": iso_now(),
         "logs": [str(path) for path in log_paths],
@@ -3221,10 +3806,12 @@ def run_shadow_training(
             "train_examples": len(train_examples),
             "valid_examples": len(valid_examples),
         },
-        "models": [baseline, dkt, sakt],
+        "models": serializable_models,
         "champion": champion["model"],
     }
+    promotion = build_shadow_promotion(curated, attempts, baseline, champion, len(valid_examples), window)
     SHADOW_REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    SHADOW_PROMOTION_PATH.write_text(json.dumps(promotion, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
 
 
@@ -3314,6 +3901,80 @@ def cmd_shadow_train(args: argparse.Namespace) -> None:
             f"logloss {item['metrics']['log_loss']:.4f}, brier {item['metrics']['brier']:.4f}, auc {auc_text}"
         )
     print(f"Champion: {report['champion']}")
+    promotion = load_shadow_promotion()
+    if promotion:
+        print(
+            "Promotion:",
+            promotion["active_model"],
+            "| promoted" if promotion.get("promoted") else "| baseline kept",
+            f"| reason {promotion.get('promotion_reason')}",
+        )
+
+
+def load_web_question_lookup() -> Dict[str, Dict[str, object]]:
+    source = WEB_DATA_PATH if WEB_DATA_PATH.exists() else CURATED_PATH
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    return {question["id"]: question for question in payload.get("questions", [])}
+
+
+class CSAAppHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(DOCS_DIR), **kwargs)
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/official-docs":
+            self.handle_official_docs(parsed)
+            return
+        super().do_GET()
+
+    def end_json(self, payload: Dict[str, object], status: int = 200) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_official_docs(self, parsed) -> None:
+        params = parse_qs(parsed.query)
+        question_id = (params.get("questionId") or [None])[0]
+        query = (params.get("query") or [None])[0]
+        force = (params.get("force") or ["0"])[0] == "1"
+        try:
+            if question_id:
+                lookup = load_web_question_lookup()
+                question = lookup.get(question_id)
+                if not question:
+                    self.end_json({"error": f"unknown questionId: {question_id}"}, status=404)
+                    return
+                evidence = resolve_official_doc_evidence(question, force_refresh=force)
+            elif query:
+                evidence = resolve_official_doc_evidence({"doc_basis": {"basis_terms": [query], "primary_topic": query}}, force_refresh=force)
+            else:
+                self.end_json({"error": "questionId or query is required"}, status=400)
+                return
+        except Exception as exc:
+            self.end_json({"error": str(exc)}, status=502)
+            return
+        if not evidence:
+            self.end_json({"error": "no evidence found"}, status=404)
+            return
+        self.end_json(evidence)
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    host = args.host
+    port = args.port
+    server = ThreadingHTTPServer((host, port), CSAAppHandler)
+    print(f"Serving CSA Spartan on http://{host}:{port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 def cmd_next(args: argparse.Namespace) -> None:
@@ -3450,6 +4111,11 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_train.add_argument("--window", type=int, default=24)
     shadow_train.add_argument("--batch-size", type=int, default=12)
     shadow_train.set_defaults(func=cmd_shadow_train)
+
+    serve = sub.add_parser("serve", help="ローカルアプリを公式Docs proxy付きで配信")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8123)
+    serve.set_defaults(func=cmd_serve)
 
     nxt = sub.add_parser("next", help="次の優先問題を表示")
     nxt.add_argument("--domain", default=None)

@@ -64,6 +64,9 @@ const state = {
   currentQuestionServedAt: null,
   hintLevel: 0,
   mockTimerHandle: null,
+  liveOfficialEvidence: {},
+  liveOfficialEvidenceRequests: {},
+  officialDocsApiAvailable: null,
 };
 
 const els = {};
@@ -227,6 +230,55 @@ async function loadDataset() {
     questionCount: state.dataset.questions.length,
     deltaQuestionCount: state.dataset.questions.filter((question) => deltaMetadata(question).active).length,
   });
+}
+
+function staticOfficialEvidence(question) {
+  return question?.official_doc_evidence || null;
+}
+
+function officialEvidenceForQuestion(question) {
+  return state.liveOfficialEvidence[question.id] || staticOfficialEvidence(question);
+}
+
+function officialDocLinks(question) {
+  const evidence = officialEvidenceForQuestion(question);
+  const links = [];
+  if (evidence?.url) links.push(evidence.url);
+  (question.docs || []).forEach((url) => {
+    if (!links.includes(url)) links.push(url);
+  });
+  return links;
+}
+
+async function ensureLiveOfficialEvidence(question, force = false) {
+  if (!question?.id) return;
+  if (!force && state.liveOfficialEvidence[question.id]) return;
+  if (!force && state.officialDocsApiAvailable === false) return;
+  if (state.liveOfficialEvidenceRequests[question.id]) return;
+
+  state.liveOfficialEvidenceRequests[question.id] = true;
+  try {
+    const response = await fetch(`./api/official-docs?questionId=${encodeURIComponent(question.id)}${force ? "&force=1" : ""}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const contentType = response.headers.get("content-type") || "";
+      if (response.status === 404 && !contentType.includes("application/json")) {
+        state.officialDocsApiAvailable = false;
+      }
+      return;
+    }
+    const evidence = await response.json();
+    if (!evidence?.url) return;
+    state.officialDocsApiAvailable = true;
+    state.liveOfficialEvidence[question.id] = evidence;
+    if (state.currentQuestionId === question.id) renderCurrentQuestion();
+    renderDashboard();
+  } catch (_error) {
+    if (state.officialDocsApiAvailable == null) state.officialDocsApiAvailable = false;
+  } finally {
+    delete state.liveOfficialEvidenceRequests[question.id];
+  }
 }
 
 function defaultConfidenceMix() {
@@ -635,7 +687,8 @@ function banditDetailForQuestion(question, signals = null) {
     clamp(1 - Math.abs(detail.model.knowledgeProb - 0.64) / 0.64, 0, 1) * 0.42 +
     clamp(1 - detail.model.predictedRecall, 0, 1) * 0.38 +
     detail.confusionPressure * 0.12 +
-    detail.confidencePressure * 0.08;
+    detail.confidencePressure * 0.08 +
+    detail.shadowBoost * 0.12;
 
   return {
     contexts,
@@ -759,6 +812,21 @@ function resetActiveWorkingSetSize() {
   shadowLog("active_pool_reset", { size: activeWorkingSetSize() });
 }
 
+function shadowModelSummary() {
+  return state.dataset?.shadow_model || {
+    promoted: false,
+    active_model: "baseline",
+    champion_model: "baseline",
+    promotion_reason: "shadow training 未実行",
+    valid_examples: 0,
+    metrics: null,
+  };
+}
+
+function shadowRuntimeForQuestion(question) {
+  return question?.shadow_runtime || null;
+}
+
 function syncActiveSetControl() {
   const config = activePoolConfig();
   const size = activeWorkingSetSize();
@@ -789,6 +857,8 @@ function initialHalfLife(question) {
 function questionModel(question, atMs = Date.now()) {
   const learner = state.user.learner;
   const record = attemptRecord(question.id);
+  const shadowSummary = shadowModelSummary();
+  const shadowRuntime = shadowRuntimeForQuestion(question);
   const domainTheta = learner.domainTheta[question.domain_key] || 0;
   const conceptThetas = (question.concept_tags || []).map((tag) => learner.conceptTheta[tag] || 0);
   const conceptTheta = average(conceptThetas, 0);
@@ -809,7 +879,15 @@ function questionModel(question, atMs = Date.now()) {
     questionBias * 0.35;
 
   const latentProb = sigmoid(effectiveDiscrimination * rawAbility);
-  const knowledgeProb = clamp(adaptiveGuess + (1 - adaptiveGuess) * latentProb, 0.03, 0.99);
+  let knowledgeProb = clamp(adaptiveGuess + (1 - adaptiveGuess) * latentProb, 0.03, 0.99);
+  const shadowPromoted = Boolean(shadowSummary.promoted && shadowRuntime?.promoted && shadowSummary.active_model !== "baseline");
+  const shadowPredictedSuccess = shadowPromoted ? clamp(numberOr(shadowRuntime.predicted_success, knowledgeProb), 0.03, 0.99) : null;
+  const shadowUncertainty = shadowPromoted ? clamp(numberOr(shadowRuntime.uncertainty, 0.45), 0, 1.4) : null;
+  const shadowOpportunity = shadowPromoted ? clamp(numberOr(shadowRuntime.opportunity, 0.4), 0, 1.5) : 0;
+  if (shadowPromoted && shadowPredictedSuccess != null) {
+    const blend = clamp(0.16 + (1 - (shadowUncertainty || 0.5)) * 0.24, 0.16, 0.38);
+    knowledgeProb = clamp(knowledgeProb * (1 - blend) + shadowPredictedSuccess * blend, 0.03, 0.99);
+  }
   const masteryProb = clamp(0.14 + knowledgeProb * 0.86, 0.14, 0.99);
   const halfLifeHours = record.halfLifeHours || initialHalfLife(question);
   const elapsedHours = record.lastSeenAt ? Math.max(0, (atMs - new Date(record.lastSeenAt).getTime()) / 3600000) : 0;
@@ -835,6 +913,11 @@ function questionModel(question, atMs = Date.now()) {
     irtDiscrimination: effectiveDiscrimination,
     irtGuess: adaptiveGuess,
     uncertainty: 1 / Math.sqrt(record.total + 1),
+    shadowPromoted,
+    shadowModel: shadowSummary.active_model,
+    shadowPredictedSuccess,
+    shadowUncertainty,
+    shadowOpportunity,
   };
 }
 
@@ -1110,6 +1193,7 @@ function questionSignals(question, domainKey = null, domainLookup = null) {
   const confusionPressure = confusionPressureForQuestion(question);
   const delta = deltaMetadata(question);
   const deltaBoost = delta.active ? clamp(delta.priority, 0.18, 1.3) : 0;
+  const shadowBoost = model.shadowPromoted ? clamp(model.shadowOpportunity || 0, 0, 1.5) : 0;
 
   return {
     model,
@@ -1126,6 +1210,7 @@ function questionSignals(question, domainKey = null, domainLookup = null) {
     confusionPressure,
     delta,
     deltaBoost,
+    shadowBoost,
   };
 }
 
@@ -1176,6 +1261,7 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
     detail.confusionPressure * 12 +
     (question.current_relevance_score || 0) * 12 +
     detail.deltaBoost * 12 +
+    detail.shadowBoost * 16 +
     bandit.score +
     contrastiveBoost * 22 +
     (contrastiveMode ? detail.confusionPressure * 18 + contrastiveBoost * 18 : 0);
@@ -1186,6 +1272,9 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
   if (detail.confidencePressure >= 0.62) reasons.push("自信と実力のズレを補正");
   if (bandit.uncertaintyBonus >= 1.1) reasons.push("contextual bandit が探索価値ありと判定");
   if (bandit.irtGainPotential >= 0.7) reasons.push("IRT上の学習利得が大きい");
+  if (detail.model.shadowPromoted && detail.shadowBoost >= 0.55) {
+    reasons.push(`${String(detail.model.shadowModel || "shadow").toUpperCase()} が本番選問へ昇格済み`);
+  }
   if (detail.record.total > 0 && detail.model.dueInHours <= 0) reasons.push("忘却曲線上、今が復習タイミング");
   if (detail.delta.active || (question.current_relevance_score || 0) >= 0.45) reasons.push("現行リリース差分を優先");
   if (detail.record.total === 0) reasons.push("未着手の高優先問題");
@@ -1205,6 +1294,7 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
     bandit,
     delta: detail.delta,
     contrastiveItem,
+    shadowBoost: detail.shadowBoost,
   };
 }
 
@@ -1252,10 +1342,14 @@ function activePoolRank(questionId) {
 
 function selectionPolicyLines() {
   const auto = state.user?.preferences?.activeWorkingSetSize == null;
+  const shadow = shadowModelSummary();
   return [
     ...state.dataset.selection_policy,
     `稼働セット ${activeWorkingSetSize()}問。${auto ? "自動制御" : "手動固定"}で、自信度 / 混同圧 / 現行性 / 復習期限を混ぜた hybrid を回す。`,
     "重複グループや canonical 候補は、アクティブプールでまず散らして偏りを抑える。",
+    shadow.promoted
+      ? `shadow ${String(shadow.active_model).toUpperCase()} を本番選問へ昇格。理由: ${shadow.promotion_reason}`
+      : `shadow は ${shadow.active_model}。${shadow.promotion_reason}`,
   ];
 }
 
@@ -1708,6 +1802,7 @@ function renderModelSummary() {
   const readiness = weightedReadiness();
   const probability = passProbability();
   const official = state.dataset.official_context;
+  const shadow = shadowModelSummary();
   const dueNow = reviewedStats().dueNow;
   const confidenceStats = recentConfidenceStats();
   const contrastiveBacklog = state.user.contrastiveQueue.length;
@@ -1720,6 +1815,7 @@ function renderModelSummary() {
       <div>直近の自信あり誤答: ${confidenceStats.confidentWrong}件 | 当てた寄り: ${confidenceStats.guessedRight}件</div>
       <div>混同キュー残: ${contrastiveBacklog}件</div>
       <div>最弱ドメイン: ${rows.slice(0, 3).map((row) => row.label_ja).join(" / ")}</div>
+      <div>Shadow: ${shadow.promoted ? `${String(shadow.active_model).toUpperCase()} 昇格済み` : "baseline維持"} | 検証 ${shadow.valid_examples || 0}例</div>
       <div class="muted">公式前提: CSA Blueprint ${official.exam_blueprint_updated} / Docs ${official.current_release_family} (${official.current_release_updated})</div>
     </div>
   `;
@@ -1763,6 +1859,11 @@ function renderNextPreview() {
     <div>予測再現率 ${Math.round(rec.model.predictedRecall * 100)}% / 稼働順位 #${activePoolRank(question.id) || "-"} / 優先度 ${Math.round(rec.activePoolScore)}</div>
     <div class="muted">推奨理由: ${rec.reasons.join(" / ")}</div>
     <div class="muted">bandit ${Math.round(rec.bandit.expectedReward * 100)} / UCB ${Math.round(rec.bandit.uncertaintyBonus * 100)} / IRT利得 ${Math.round(rec.bandit.irtGainPotential * 100)}</div>
+    ${
+      rec.model.shadowPromoted
+        ? `<div class="muted">shadow ${escapeHtml(String(rec.model.shadowModel).toUpperCase())} / 予測成功 ${Math.round((rec.model.shadowPredictedSuccess || 0) * 100)} / 機会 ${Math.round((rec.model.shadowOpportunity || 0) * 100)}</div>`
+        : ""
+    }
     <div class="muted">出所: ${source === "contrastive" ? "混同キュー" : "稼働ワーキングセット"}${rec.delta.active ? ` | ${rec.delta.label}` : ""}</div>
   `;
   els["next-preview"].appendChild(card);
@@ -1891,11 +1992,13 @@ function renderDeltaModeSummary() {
 function renderShadowTelemetry() {
   const entries = window.__CSA_SHADOW_LOG__ || [];
   const installed = typeof window.__CSA_SHADOW_HOOK__ === "function";
+  const shadow = shadowModelSummary();
   const recent = entries.slice(-4).reverse();
   els["shadow-telemetry"].innerHTML = `
     <div class="today-box">
-      <strong>Shadow Logging</strong>
-      <div>${installed ? "外部連携フックあり" : "フック未接続"} | バッファ ${entries.length}/${SHADOW_LOG_LIMIT}</div>
+      <strong>Shadow KT</strong>
+      <div>${shadow.promoted ? `${String(shadow.active_model).toUpperCase()} 昇格済み` : "baseline 維持"} | ${installed ? "外部連携フックあり" : "フック未接続"} | バッファ ${entries.length}/${SHADOW_LOG_LIMIT}</div>
+      <div class="muted">理由: ${escapeHtml(shadow.promotion_reason || "shadow training 未実行")}</div>
       <div class="mini-stack">
         ${
           recent.length
@@ -1909,7 +2012,7 @@ function renderShadowTelemetry() {
                   `
                 )
                 .join("")
-            : '<div class="muted">window.__CSA_SHADOW_HOOK__ に future deep KT 用の collector を差し込める。</div>'
+            : '<div class="muted">export した JSONL を shadow-train に掛けると、DKT/SAKT の champion を本番選問へ昇格できる。</div>'
         }
       </div>
     </div>
@@ -1977,6 +2080,18 @@ function loadNextDrillQuestion() {
 function questionEvidenceHtml(question) {
   const delta = deltaMetadata(question);
   const lines = [];
+  const evidence = officialEvidenceForQuestion(question);
+  if (evidence?.title) {
+    const metaBits = [evidence.release_family, evidence.updated_on].filter(Boolean).join(" / ");
+    lines.push(
+      `<div><strong>公式Docs</strong>: <a href="${escapeHtml(evidence.url)}" target="_blank" rel="noreferrer">${escapeHtml(
+        evidence.title
+      )}</a>${metaBits ? ` <span class="muted">(${escapeHtml(metaBits)})</span>` : ""}</div>`
+    );
+  }
+  if (evidence?.snippet) {
+    lines.push(`<div><strong>公式要約</strong>: ${escapeHtml(shortSnippet(evidence.snippet, 180))}</div>`);
+  }
   if (delta.snippets.length) {
     lines.push(`<div><strong>根拠要点</strong>: ${escapeHtml(shortSnippet(delta.snippets.join(" / "), 140))}</div>`);
   }
@@ -1992,6 +2107,7 @@ function renderCurrentQuestion() {
     clearCurrentQuestion();
     return;
   }
+  void ensureLiveOfficialEvidence(question);
 
   const domainLookup = Object.fromEntries(domainReadinessRows().map((row) => [row.domain_key, row]));
   const rec = recommendationForQuestion(question, currentDomainMode(), domainLookup, { mode: currentDrillMode() });
@@ -2018,6 +2134,11 @@ function renderCurrentQuestion() {
     <div class="muted">概念: ${(question.concept_tags || []).map(conceptLabelJa).join(" / ") || "未分類"} | 現行トピック: ${(question.current_service_tags || []).map(conceptLabelJa).join(" / ") || "なし"}</div>
     <div class="muted">混同キー: ${escapeHtml(familyKey)} | 自信圧 ${Math.round(rec.confidencePressure * 100)} / 混同圧 ${Math.round(rec.confusionPressure * 100)}</div>
     <div class="muted">IRT難度 ${rec.model.irtDifficulty.toFixed(2)} / 識別力 ${rec.model.irtDiscrimination.toFixed(2)} / bandit利得 ${Math.round(rec.bandit.expectedReward * 100)} / 探索 ${Math.round(rec.bandit.uncertaintyBonus * 100)}</div>
+    ${
+      rec.model.shadowPromoted
+        ? `<div class="muted">shadow ${escapeHtml(String(rec.model.shadowModel).toUpperCase())} / 予測成功 ${Math.round((rec.model.shadowPredictedSuccess || 0) * 100)} / 不確実性 ${Math.round((rec.model.shadowUncertainty || 0) * 100)} / 学習機会 ${Math.round((rec.model.shadowOpportunity || 0) * 100)}</div>`
+        : ""
+    }
     ${questionEvidenceHtml(question)}
   `;
 
@@ -2145,7 +2266,7 @@ function revealHint() {
   els["hint-box"].classList.remove("hidden");
 
   const wrongChoice = question.choices.find((choice) => !question.correct_choice_ids.includes(choice.id));
-  const evidence = deltaMetadata(question).snippets[0];
+  const evidence = officialEvidenceForQuestion(question)?.snippet || deltaMetadata(question).snippets[0];
   const hints = [
     `ヒント1: 正答は ${question.choose_count} 個。数を外すな。`,
     `ヒント2: この問題の核は ${(question.concept_tags || []).slice(0, 2).map(conceptLabelJa).join(" / ") || question.domain_label_ja}。`,
@@ -2183,7 +2304,7 @@ function submitCurrentQuestion() {
   });
 
   const nextReview = dueIntervalHours(update.record.halfLifeHours);
-  const docsHtml = (question.docs || [])
+  const docsHtml = officialDocLinks(question)
     .map((url, index) => `<a href="${url}" target="_blank" rel="noreferrer">公式${index + 1}</a>`)
     .join(" / ");
   const queuedLine = update.queued.length

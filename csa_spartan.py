@@ -606,6 +606,90 @@ CURRENT_RELEASE_PRIORITY_TAGS = {
     "shared_responsibility_model",
 }
 
+CONCEPT_LABELS_JA = {
+    "platform_overview": "プラットフォーム概要",
+    "the_instance": "インスタンス",
+    "next_experience_unified_navigation": "Next Experience / Unified Navigation",
+    "search_and_lists": "検索とリスト",
+    "user_menu_and_roles": "ユーザーメニューとロール",
+    "installing_applications_and_plugins": "アプリとプラグイン",
+    "personalizing_customizing_instance": "個人設定とインスタンス調整",
+    "common_user_interfaces": "共通UI",
+    "instance_properties": "システムプロパティ",
+    "lists_filters_tags": "リスト・フィルタ・タグ",
+    "list_and_form_anatomy": "リスト/フォーム構造",
+    "form_configuration": "フォーム設定",
+    "task_management": "タスク管理",
+    "visual_task_boards": "Visual Task Boards",
+    "platform_analytics": "Platform Analytics",
+    "notifications": "通知",
+    "knowledge_management": "ナレッジ管理",
+    "service_catalog": "サービスカタログ",
+    "workflow_studio": "Workflow Studio",
+    "virtual_agent": "Virtual Agent",
+    "data_schema": "データスキーマ",
+    "application_access_control": "Access Control",
+    "importing_data": "データ取り込み",
+    "cmdb_and_csdm": "CMDB / CSDM",
+    "security_center": "Security Center",
+    "shared_responsibility_model": "責任共有モデル",
+    "ui_policies": "UI Policy",
+    "business_rules": "Business Rule",
+    "system_update_sets": "Update Set",
+    "scripting_in_servicenow": "ServiceNowスクリプト",
+}
+
+CURRENT_SERVICE_LABELS_JA = {
+    "next_experience_unified_navigation": "Unified Navigation",
+    "platform_analytics": "Platform Analytics",
+    "workflow_studio": "Workflow Studio",
+    "virtual_agent": "Virtual Agent",
+    "security_center": "Security Center",
+    "shared_responsibility_model": "責任共有モデル",
+}
+
+CONCEPT_COACH_NOTES = {
+    "platform_overview": "Now Platform は業務アプリの基盤だ。個別機能名ではなく、何を実現する土台かで判断しろ。",
+    "the_instance": "インスタンスは 1 つの ServiceNow 環境だ。設定・データ・URL をまとめて捉えろ。",
+    "next_experience_unified_navigation": "Unified Navigation は上部ナビで横断操作を担う。検索、通知、ワークスペース切替をここに結び付けろ。",
+    "search_and_lists": "検索とリストは『今あるデータを探して絞る』ための機能だ。フィルタ、グループ化、タグを区別しろ。",
+    "user_menu_and_roles": "Impersonate や権限昇格はユーザーメニュー起点だ。誰が実行できるかはロールで決まる。",
+    "installing_applications_and_plugins": "アプリやプラグインは機能有効化の入口だ。依存関係と有効化範囲を見落とすな。",
+    "personalizing_customizing_instance": "個人設定とインスタンス全体設定を混同するな。誰に効く変更かで切り分けろ。",
+    "common_user_interfaces": "Workspace、Classic UI、リスト、フォームは役割が違う。UI 種別を問われたらここだ。",
+    "instance_properties": "System Properties は動作切替の全体設定だ。画面レイアウト変更とは別物として覚えろ。",
+    "lists_filters_tags": "リスト操作は並び替え、フィルタ、タグ、グループ化が中心だ。閲覧効率系の定番論点だ。",
+    "list_and_form_anatomy": "関連リンク、関連リスト、コンテキストメニューなど、部品名を正確に区別しろ。",
+    "form_configuration": "フォーム表示の構成変更と、辞書レベルのデータ定義変更を混ぜるな。",
+    "task_management": "Task 系は共通 Task テーブル前提で考える。割当、状態、活動記録の共通性が軸だ。",
+    "visual_task_boards": "VTB はカード型で作業を可視化する UI だ。ACL やテーブル設計の話ではない。",
+    "platform_analytics": "Report は現在の状態、Analytics は時系列の傾向だ。この切り分けを外すな。",
+    "notifications": "通知は『誰に、いつ、何を送るか』で整理しろ。トリガ、受信者、本文を分けて考えろ。",
+    "knowledge_management": "ナレッジは記事管理、公開条件、検索性が論点だ。単なる添付やメールとは違う。",
+    "service_catalog": "Catalog Item、Record Producer、Order Guide の用途差は本番頻出だ。役割で覚えろ。",
+    "workflow_studio": "Workflow Studio / Flow 系は自動化の設計と再利用が軸だ。手作業運用と混同するな。",
+    "virtual_agent": "Virtual Agent は会話導線で自己解決を促す。通常フォーム入力との違いを押さえろ。",
+    "data_schema": "テーブル、フィールド、参照、拡張はデータ構造の問題だ。表示設定の話ではない。",
+    "application_access_control": "ACL は条件、ロール、スクリプトの積で判定する。見えるか書けるかはここで決まる。",
+    "importing_data": "Data Source → Import Set → Transform Map → Coalesce の流れで整理しろ。",
+    "cmdb_and_csdm": "CMDB は CI 管理、CSDM はその整理モデルだ。資産台帳と混同するな。",
+    "security_center": "Security Center はセキュリティ状態を可視化し統制する入口だ。個別 ACL の代替ではない。",
+    "shared_responsibility_model": "責任共有モデルでは ServiceNow 側と顧客側の責任を分けて考える。設定と運用の多くは顧客責任だ。",
+    "ui_policies": "UI Policy は見た目や必須/読取専用の制御だ。DB 更新ロジックではない。",
+    "business_rules": "Business Rule はサーバー側ロジックだ。保存前後や表示時など、実行タイミングで切れ。",
+    "system_update_sets": "Update Set は設定変更の移送だ。業務データ移行とは用途が違う。",
+    "scripting_in_servicenow": "スクリプトはクライアントかサーバーかを先に分けろ。実行場所を外すな。",
+}
+
+DOMAIN_COACH_NOTES = {
+    "platform_overview_navigation": "プラットフォーム全体の役割と、ナビゲーション部品の位置づけで判断しろ。",
+    "instance_configuration": "個人設定か全体設定か、UI変更かプロパティ変更かを切り分けろ。",
+    "configuring_applications_for_collaboration": "通知、レポート、フォーム部品、コラボ機能の役割差で判定しろ。",
+    "self_service_automation": "Catalog、Knowledge、Virtual Agent、Flow の用途差を軸に切れ。",
+    "database_management_platform_security": "テーブル、ACL、ロール、CMDB など、データ構造と権限で考えろ。",
+    "data_migration_integration": "Import、Transform、Script、Update Set の責務と流れを整理しろ。",
+}
+
 
 def now_local() -> datetime:
     return datetime.now().astimezone()
@@ -623,6 +707,25 @@ def normalize_text(text: str) -> str:
 def normalize_key(text: str) -> str:
     text = normalize_text(text).lower()
     return re.sub(r"\s+", " ", text)
+
+
+def contains_japanese(text: str) -> bool:
+    return bool(text and JP_CHAR_RE.search(text))
+
+
+def english_alpha_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    ja_chars = len(JP_CHAR_RE.findall(text))
+    en_chars = len(re.findall(r"[A-Za-z]", text))
+    total = ja_chars + en_chars
+    if total == 0:
+        return 0.0
+    return en_chars / total
+
+
+def mostly_japanese(text: str, *, threshold: float = 0.18) -> bool:
+    return contains_japanese(text) and english_alpha_ratio(text) <= threshold
 
 
 def ensure_runtime_dir() -> None:
@@ -896,6 +999,20 @@ def canonical_signature(prompt: str, choices: Iterable[str]) -> str:
     return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:16]
 
 
+def glossary_pattern(source: str) -> str:
+    escaped = re.escape(source)
+    if re.fullmatch(r"[A-Za-z0-9 /&().+\-]+", source):
+        return rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])"
+    return escaped
+
+
+def apply_glossary(text: str) -> str:
+    translated = text
+    for source, target in sorted(GLOSSARY.items(), key=lambda item: len(item[0]), reverse=True):
+        translated = re.sub(glossary_pattern(source), target, translated, flags=re.IGNORECASE)
+    return translated
+
+
 def translate_text_en(text: str) -> str:
     if not text:
         return text
@@ -910,8 +1027,44 @@ def translate_text_en(text: str) -> str:
     for pattern, value in replacements:
         translated = re.sub(pattern, value, translated, flags=re.IGNORECASE)
 
-    for source, target in sorted(GLOSSARY.items(), key=lambda item: len(item[0]), reverse=True):
-        translated = re.sub(re.escape(source), target, translated, flags=re.IGNORECASE)
+    translated = apply_glossary(translated)
+
+    phrase_replacements = [
+        (r"(?i)\bfor example\b", "たとえば"),
+        (r"(?i)\bby default\b", "デフォルトでは"),
+        (r"(?i)\bin real-time\b", "リアルタイムで"),
+        (r"(?i)\bover time\b", "時間の経過に伴って"),
+        (r"(?i)\bthe current state of\b", "現在の"),
+        (r"(?i)\bcurrent state of\b", "現在の"),
+        (r"(?i)\bfor testing purposes\b", "テスト目的で"),
+        (r"(?i)\bthe primary way to\b", "するための主要な方法"),
+        (r"(?i)\bthe primary way\b", "主要な方法"),
+        (r"(?i)\bcan be used to\b", "に使用できます"),
+        (r"(?i)\ballows users to\b", "を使用すると、ユーザーは"),
+        (r"(?i)\ballows you to\b", "を使用すると、"),
+        (r"(?i)\blets you\b", "を使用すると、"),
+        (r"(?i)\benables you to\b", "を可能にします"),
+        (r"(?i)\benables users to\b", "により、ユーザーは"),
+        (r"(?i)\bused to\b", "に使用される"),
+        (r"(?i)\bview and update\b", "表示および更新"),
+        (r"(?i)\bview and edit\b", "表示および編集"),
+        (r"(?i)\bview documents directly\b", "ドキュメントを直接表示"),
+        (r"(?i)\bopen and edit\b", "開いて編集"),
+        (r"(?i)\btrack and view\b", "追跡および表示"),
+        (r"(?i)\bsingle pane\b", "単一ペイン"),
+        (r"(?i)\bone-stop experience\b", "ワンストップ体験"),
+        (r"(?i)\bdark theme\b", "ダークテーマ"),
+        (r"(?i)\bdark mode\b", "ダークモード"),
+        (r"(?i)\bidentity providers\b", "ID プロバイダ"),
+        (r"(?i)\bpasscode\b", "パスコード"),
+        (r"(?i)\bpush notifications\b", "プッシュ通知"),
+        (r"(?i)\bmachine-learning\b", "機械学習"),
+        (r"(?i)\band\b", "と"),
+        (r"(?i)\bor\b", "または"),
+        (r"(?i)\bwhile\b", "一方で"),
+    ]
+    for pattern, value in phrase_replacements:
+        translated = re.sub(pattern, value, translated)
 
     if translated.lower().startswith("which one of the following"):
         translated = re.sub(r"(?i)^which one of the following\s+", "次のうち、", translated)
@@ -943,9 +1096,27 @@ def translate_text_en(text: str) -> str:
         translated = re.sub(r"(?i)^how many\s+", "", translated)
         translated = translated.rstrip("?")
         translated = f"{translated} はいくつですか？"
+    elif translated.lower().startswith("you can use "):
+        translated = re.sub(r"(?i)^you can use\s+", "", translated)
+        translated = translated.rstrip(".?")
+        translated = f"{translated} を使用できます。"
+    elif translated.lower().startswith("you can "):
+        translated = re.sub(r"(?i)^you can\s+", "", translated)
+        translated = translated.rstrip(".?")
+        translated = f"{translated} できます。"
+    elif translated.lower().startswith("the following "):
+        translated = re.sub(r"(?i)^the following\s+", "次の", translated)
+    elif translated.lower().startswith("a "):
+        translated = re.sub(r"(?i)^a\s+", "", translated)
+    elif translated.lower().startswith("an "):
+        translated = re.sub(r"(?i)^an\s+", "", translated)
+    elif translated.lower().startswith("the "):
+        translated = re.sub(r"(?i)^the\s+", "", translated)
 
     translated = translated.replace(" ,", "、").replace(", ", "、")
     translated = translated.replace(" ? ", "？ ").replace(" ?", "？")
+    translated = translated.replace(" .", "。").replace(". ", "。 ")
+    translated = re.sub(r"\s+", " ", translated)
     return translated
 
 
@@ -1071,7 +1242,7 @@ def parse_question_block(block: Dict[str, object], global_index: int) -> Dict[st
 
     for idx, choice in enumerate(choices):
         choice["id"] = chr(ord("A") + idx)
-        if language == "en":
+        if pick_prompt_language(choice["text"]) == "en":
             choice["text_ja"] = translate_text_en(choice["text"])
         else:
             choice["text_ja"] = choice["text"]
@@ -1079,6 +1250,7 @@ def parse_question_block(block: Dict[str, object], global_index: int) -> Dict[st
     overall_explanation = " ".join(meta.get("overall_explanation_lines", [])).strip()
     if not overall_explanation:
         overall_explanation = infer_overall_explanation(choices)
+    explanation_language = pick_prompt_language(overall_explanation)
 
     correct_ids = [choice["id"] for choice in choices if choice.get("is_correct")]
     selected_ids = [choice["id"] for choice in choices if choice.get("was_selected")]
@@ -1104,7 +1276,7 @@ def parse_question_block(block: Dict[str, object], global_index: int) -> Dict[st
         "correct_choice_ids": correct_ids,
         "selected_choice_ids": selected_ids,
         "overall_explanation": overall_explanation,
-        "overall_explanation_ja": overall_explanation if language == "ja" else translate_text_en(overall_explanation),
+        "overall_explanation_ja": overall_explanation if explanation_language == "ja" else translate_text_en(overall_explanation),
         "learning_domains": meta.get("learning_domains", []),
         "domain_labels": meta.get("domain_labels", []),
         "subdomains": meta.get("subdomains", []),
@@ -1313,6 +1485,55 @@ def docs_for_question(question: Dict[str, object]) -> List[str]:
         if topic and topic not in deduped:
             deduped.append(topic)
     return [docs_search_url(topic) for topic in deduped[:2]]
+
+
+def concept_label_ja(tag: str) -> str:
+    return CONCEPT_LABELS_JA.get(tag, tag.replace("_", " "))
+
+
+def current_service_label_ja(tag: str) -> str:
+    return CURRENT_SERVICE_LABELS_JA.get(tag, concept_label_ja(tag))
+
+
+def build_explanation_ja(
+    question: Dict[str, object],
+    concept_tags: List[str],
+    release_tags: List[str],
+) -> str:
+    original = normalize_text(question.get("overall_explanation_ja") or question.get("overall_explanation") or "")
+    if original and mostly_japanese(original):
+        return original
+
+    correct_texts = []
+    for choice in question.get("choices", []):
+        if choice.get("id") not in question.get("correct_choice_ids", []):
+            continue
+        text = normalize_text(choice.get("text_ja") or choice.get("text") or "")
+        if mostly_japanese(text, threshold=0.22):
+            correct_texts.append(text.rstrip("。"))
+
+    concept_labels = [concept_label_ja(tag) for tag in concept_tags[:2]]
+    concept_notes = [CONCEPT_COACH_NOTES[tag] for tag in concept_tags if tag in CONCEPT_COACH_NOTES][:2]
+    release_labels = [current_service_label_ja(tag) for tag in release_tags[:2]]
+
+    lines = [f"正解は {', '.join(question['correct_choice_ids'])}。"]
+    if question.get("multi_select"):
+        lines.append(f"複数選択だ。{question['choose_count']}個を外した時点で失点だ。")
+    if correct_texts:
+        lines.append(f"正答肢の要点: {' / '.join(correct_texts[:2])}。")
+    if concept_labels:
+        lines.append(f"論点: {' / '.join(concept_labels)}。")
+    if concept_notes:
+        lines.append("押さえる点: " + " ".join(concept_notes))
+    elif question.get("top_domain") in DOMAIN_COACH_NOTES:
+        lines.append("押さえる点: " + DOMAIN_COACH_NOTES[question["top_domain"]])
+    if release_labels:
+        lines.append(f"2026観点: {' / '.join(release_labels)}。")
+
+    generated = " ".join(lines).strip()
+    if generated:
+        return generated
+    return original or "正解根拠を日本語で補完中。まずは正答肢と公式ドキュメントのキーワードを結び付けろ。"
 
 
 def format_question(question: Dict[str, object]) -> str:
@@ -1723,7 +1944,8 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "correct_choice_ids": question["correct_choice_ids"],
                 "multi_select": question["multi_select"],
                 "choose_count": question["choose_count"],
-                "explanation": question["overall_explanation_ja"] or question["overall_explanation"],
+                "explanation": build_explanation_ja(question, item["adaptive_tags"], item["release_tags"]),
+                "original_explanation": question["overall_explanation"],
                 "docs": docs_for_question(question),
                 "yield_score": round(item["score"], 2),
                 "yield_reasons": item["reasons"],
@@ -1872,7 +2094,9 @@ def cmd_answer(args: argparse.Namespace) -> None:
     print("RESULT:", "正解" if correct else "不正解")
     print("Your answer:", ",".join(user_ids) or "(blank)")
     print("Correct:", ",".join(correct_ids) or "(unknown)")
-    explanation = question["overall_explanation_ja"] or question["overall_explanation"] or "解説がありません。"
+    concept_tags = extract_adaptive_tags(question)
+    release_tags = current_release_tags(concept_tags)
+    explanation = build_explanation_ja(question, concept_tags, release_tags)
     print("Explanation:", explanation)
     docs = docs_for_question(question)
     if docs:
@@ -1950,7 +2174,9 @@ def cmd_mock_answer(args: argparse.Namespace) -> None:
     print("RESULT:", "正解" if correct else "不正解")
     print("Correct:", ",".join(correct_ids))
     print("Remaining:", remaining)
-    print("Explanation:", question["overall_explanation_ja"] or question["overall_explanation"] or "解説なし")
+    concept_tags = extract_adaptive_tags(question)
+    release_tags = current_release_tags(concept_tags)
+    print("Explanation:", build_explanation_ja(question, concept_tags, release_tags))
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -6,6 +6,7 @@
 *.swp
 *.swo
 *~
+__pycache__/
 
 # CSA Spartan runtime cache/state
 .csa_spartan/

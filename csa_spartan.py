@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import random
@@ -464,6 +465,9 @@ DOC_TOPIC_HINTS = [
 CURATED_BANK_SIZE = 600
 DEFAULT_STUDY_DAYS = 14
 DEFAULT_DAILY_HOURS = 2.5
+ACTIVE_POOL_MIN_SIZE = 420
+ACTIVE_POOL_DEFAULT_SIZE = 480
+ACTIVE_POOL_MAX_SIZE = 560
 
 CURATION_TOPIC_TAGS = {
     "platform_overview_navigation": {
@@ -606,6 +610,11 @@ CURRENT_RELEASE_PRIORITY_TAGS = {
     "shared_responsibility_model",
 }
 
+ACTIVE_POOL_MIN = ACTIVE_POOL_MIN_SIZE
+ACTIVE_POOL_MAX = ACTIVE_POOL_MAX_SIZE
+ACTIVE_POOL_DEFAULT = ACTIVE_POOL_DEFAULT_SIZE
+DELTA_MODE_BOOST = 0.12
+
 CONCEPT_LABELS_JA = {
     "platform_overview": "プラットフォーム概要",
     "the_instance": "インスタンス",
@@ -688,6 +697,144 @@ DOMAIN_COACH_NOTES = {
     "self_service_automation": "Catalog、Knowledge、Virtual Agent、Flow の用途差を軸に切れ。",
     "database_management_platform_security": "テーブル、ACL、ロール、CMDB など、データ構造と権限で考えろ。",
     "data_migration_integration": "Import、Transform、Script、Update Set の責務と流れを整理しろ。",
+}
+
+SIMILARITY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "how",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "what",
+    "which",
+    "with",
+    "you",
+    "your",
+    "using",
+    "use",
+    "when",
+    "where",
+    "次",
+    "次の",
+    "どれ",
+    "どれですか",
+    "何",
+    "何ですか",
+    "以下",
+    "場合",
+    "会社",
+    "企業",
+    "ユーザー",
+}
+
+CONFUSION_FAMILIES = {
+    "ui_policy_data_policy_client_script": {
+        "label_ja": "UI Policy / Data Policy / Client Script",
+        "domains": {"instance_configuration", "data_migration_integration"},
+        "groups": [
+            ["ui policy", "ui policies", "uiポリシー"],
+            ["data policy", "data policies", "データポリシー"],
+            ["client script", "client scripts", "クライアントスクリプト"],
+        ],
+        "doc_topics": ["UI policies", "Data policies", "Client scripts"],
+        "root_snippet": "UI Policy はフォーム表示制御、Data Policy は入力制約の強制、Client Script はクライアント側ロジックだ。",
+    },
+    "report_platform_analytics_dashboard": {
+        "label_ja": "Report / Platform Analytics / Dashboard",
+        "domains": {"configuring_applications_for_collaboration"},
+        "groups": [
+            ["report", "reports", "レポート"],
+            ["platform analytics", "performance analytics", "analytics"],
+            ["dashboard", "dashboards", "ダッシュボード"],
+        ],
+        "doc_topics": ["Reports", "Platform Analytics", "Dashboards"],
+        "root_snippet": "Report は現在の集計や一覧、Platform Analytics は指標の傾向分析、Dashboard は可視化の置き場だ。",
+    },
+    "catalog_item_record_producer_order_guide": {
+        "label_ja": "Catalog Item / Record Producer / Order Guide",
+        "domains": {"self_service_automation"},
+        "groups": [
+            ["catalog item", "catalog items", "カタログアイテム", "service catalog", "サービスカタログ"],
+            ["record producer", "record producers", "レコードプロデューサー"],
+            ["order guide", "order guides", "オーダーガイド"],
+        ],
+        "doc_topics": ["Service Catalog", "Record Producers", "Order Guides"],
+        "root_snippet": "Catalog Item は要求対象、Record Producer はレコード作成、Order Guide は複数依頼の束ね役だ。",
+    },
+    "role_acl_user_criteria": {
+        "label_ja": "Role / ACL / User Criteria",
+        "domains": {"database_management_platform_security"},
+        "groups": [
+            ["role", "roles", "ロール"],
+            ["access control", "acl", "アクセス制御"],
+            ["user criteria", "ユーザー基準"],
+        ],
+        "doc_topics": ["Roles", "Access control rules", "User criteria"],
+        "root_snippet": "Role は権限の割当単位、ACL は実際のアクセス判定、User Criteria は表示対象の絞り込みだ。",
+    },
+    "import_set_transform_map_coalesce": {
+        "label_ja": "Import Set / Transform Map / Coalesce",
+        "domains": {"data_migration_integration", "database_management_platform_security"},
+        "groups": [
+            ["import set", "import sets", "インポートセット"],
+            ["transform map", "transform maps", "変換マップ"],
+            ["coalesce"],
+        ],
+        "doc_topics": ["Import Sets", "Transform Maps", "Coalesce"],
+        "root_snippet": "Import Set は受け皿、Transform Map は変換定義、Coalesce は一致キーだ。流れを崩すな。",
+    },
+    "knowledge_article_kb_category": {
+        "label_ja": "Knowledge Article / Knowledge Base / Category",
+        "domains": {"configuring_applications_for_collaboration", "self_service_automation"},
+        "groups": [
+            ["knowledge article", "article", "記事"],
+            ["knowledge base", "ナレッジベース"],
+            ["category", "categories", "カテゴリ"],
+        ],
+        "doc_topics": ["Knowledge Management"],
+        "root_snippet": "Article は個別記事、Knowledge Base は公開先の器、Category は整理軸だ。",
+    },
+    "workflow_studio_flow_designer_playbook": {
+        "label_ja": "Workflow Studio / Flow Designer / Playbook",
+        "domains": {"self_service_automation"},
+        "groups": [
+            ["workflow studio", "workflow"],
+            ["flow designer", "subflow", "action designer"],
+            ["playbook"],
+        ],
+        "doc_topics": ["Workflow Studio", "Flow Designer", "Playbook"],
+        "root_snippet": "Workflow Studio は自動化設計の入口、Flow Designer はフロー本体、Playbook は作業導線の定義だ。",
+    },
+    "cmdb_csdm_configuration_item": {
+        "label_ja": "CMDB / CSDM / Configuration Item",
+        "domains": {"database_management_platform_security"},
+        "groups": [
+            ["cmdb"],
+            ["csdm"],
+            ["configuration item", "configuration items", "構成アイテム", "ci "],
+        ],
+        "doc_topics": ["CMDB", "Common Service Data Model"],
+        "root_snippet": "CMDB は CI の保管庫、CSDM は整理モデル、Configuration Item は個々の管理対象だ。",
+    },
 }
 
 
@@ -1649,6 +1796,381 @@ def question_blob_ja(question: Dict[str, object]) -> str:
     return normalize_key(" ".join(part for part in parts if part))
 
 
+def dedupe_preserve_order(values: Iterable[str]) -> List[str]:
+    seen = set()
+    ordered: List[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def active_pool_bounds(curated_cap: int) -> Dict[str, int]:
+    max_size = min(ACTIVE_POOL_MAX_SIZE, curated_cap)
+    default_size = min(ACTIVE_POOL_DEFAULT_SIZE, max_size)
+    min_size = min(ACTIVE_POOL_MIN_SIZE, default_size)
+    return {
+        "min_size": min_size,
+        "default_size": default_size,
+        "max_size": max_size,
+        "curated_cap": curated_cap,
+    }
+
+
+def compact_similarity_text(text: str) -> str:
+    normalized = normalize_key(apply_glossary(text))
+    return re.sub(r"[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+", "", normalized)
+
+
+def char_ngrams(text: str, n: int = 3) -> set[str]:
+    if not text:
+        return set()
+    if len(text) <= n:
+        return {text}
+    return {text[index : index + n] for index in range(len(text) - n + 1)}
+
+
+def lexical_tokens(text: str) -> List[str]:
+    normalized = normalize_key(apply_glossary(text))
+    tokens = re.findall(r"[a-z0-9_./+\-]{2,}|[\u3040-\u30ff\u3400-\u9fff]{2,}", normalized)
+    filtered = [
+        token
+        for token in tokens
+        if token not in SIMILARITY_STOPWORDS and not token.isdigit() and len(token) > 1
+    ]
+    return dedupe_preserve_order(filtered)
+
+
+def jaccard_score(left: Iterable[str], right: Iterable[str]) -> float:
+    left_set = set(left)
+    right_set = set(right)
+    if not left_set or not right_set:
+        return 0.0
+    return len(left_set & right_set) / len(left_set | right_set)
+
+
+def detect_confusion_family(
+    question: Dict[str, object],
+    topic_tags: List[str],
+    adaptive_tags: List[str],
+) -> Optional[str]:
+    blob = question_blob_ja(question)
+    best_key: Optional[str] = None
+    best_score = 0.0
+    for family_key, meta in CONFUSION_FAMILIES.items():
+        group_hits = 0
+        raw_hits = 0
+        for group in meta["groups"]:
+            matched = [pattern for pattern in group if pattern in blob]
+            if matched:
+                group_hits += 1
+                raw_hits += len(matched)
+        if group_hits == 0:
+            continue
+        domain_match = question["top_domain"] in meta["domains"]
+        if not domain_match and group_hits < 2:
+            continue
+        score = group_hits * 10.0 + min(5.0, raw_hits)
+        if domain_match:
+            score += 2.0
+        if group_hits >= 2:
+            score += 4.0
+        if any(topic in family_key for topic in topic_tags + adaptive_tags):
+            score += 1.5
+        if score > best_score:
+            best_key = family_key
+            best_score = score
+    return best_key
+
+
+def question_similarity_meta(
+    question: Dict[str, object],
+    topic_tags: List[str],
+    adaptive_tags: List[str],
+) -> Dict[str, object]:
+    prompt_text = normalize_text(question.get("prompt_ja") or question.get("prompt") or "")
+    choice_text = " ".join(
+        normalize_text(choice.get("text_ja") or choice.get("text") or "")
+        for choice in question.get("choices", [])
+    )
+    answer_text = " ".join(
+        normalize_text(choice.get("text_ja") or choice.get("text") or "")
+        for choice in question.get("choices", [])
+        if choice.get("id") in question.get("correct_choice_ids", [])
+    )
+    prompt_compact = compact_similarity_text(prompt_text)
+    answer_compact = compact_similarity_text(answer_text)
+    choice_compact = compact_similarity_text(choice_text)
+    seed_terms = lexical_tokens(" ".join([prompt_text, answer_text, choice_text]))[:10]
+    return {
+        "prompt_ngrams": char_ngrams(prompt_compact, 3),
+        "answer_ngrams": char_ngrams(answer_compact, 3),
+        "choice_ngrams": char_ngrams(choice_compact, 3),
+        "seed_terms": seed_terms,
+        "cluster_tags": dedupe_preserve_order(topic_tags + adaptive_tags),
+    }
+
+
+def build_doc_basis(
+    question: Dict[str, object],
+    concept_tags: List[str],
+    release_tags: List[str],
+    confusion_family: Optional[str],
+) -> Dict[str, object]:
+    links = docs_for_question(question)
+    learn_more_topics = dedupe_preserve_order(
+        [normalize_text(topic) for topic in question.get("learn_more_topics", []) if topic]
+    )
+    family_meta = CONFUSION_FAMILIES.get(confusion_family or "")
+    if question.get("doc_urls"):
+        basis_type = "official_url"
+    elif learn_more_topics:
+        basis_type = "learn_more_topic"
+    elif family_meta:
+        basis_type = "confusion_family"
+    elif concept_tags:
+        basis_type = "concept_tag"
+    else:
+        basis_type = "domain_fallback"
+
+    primary_topic = (
+        learn_more_topics[0]
+        if learn_more_topics
+        else (family_meta["doc_topics"][0] if family_meta else None)
+    ) or (concept_label_ja(concept_tags[0]) if concept_tags else TOP_DOMAINS[question["top_domain"]]["label"])
+
+    secondary_topics = dedupe_preserve_order(
+        list(learn_more_topics[1:3])
+        + (family_meta["doc_topics"][1:3] if family_meta else [])
+        + [concept_label_ja(tag) for tag in concept_tags[:2]]
+        + [current_service_label_ja(tag) for tag in release_tags[:2]]
+    )
+    secondary_topics = [topic for topic in secondary_topics if topic != primary_topic][:3]
+
+    basis_seed = [primary_topic] + secondary_topics
+    if family_meta:
+        basis_seed.append(family_meta["label_ja"])
+    basis_terms = dedupe_preserve_order(basis_seed)
+    return {
+        "basis_type": basis_type,
+        "primary_topic": primary_topic,
+        "secondary_topics": secondary_topics,
+        "source_urls": links[:3],
+        "basis_terms": basis_terms[:5],
+    }
+
+
+def build_root_snippet(
+    question: Dict[str, object],
+    concept_tags: List[str],
+    release_tags: List[str],
+    confusion_family: Optional[str],
+) -> str:
+    family_meta = CONFUSION_FAMILIES.get(confusion_family or "")
+    snippet = ""
+    if family_meta:
+        snippet = family_meta["root_snippet"]
+    elif concept_tags:
+        snippet = CONCEPT_COACH_NOTES.get(concept_tags[0], "")
+    if not snippet:
+        snippet = DOMAIN_COACH_NOTES.get(question["top_domain"], "")
+    if release_tags:
+        release_focus = " / ".join(current_service_label_ja(tag) for tag in release_tags[:2])
+        if release_focus:
+            snippet = f"{snippet} 2026重点: {release_focus}。".strip()
+    return snippet
+
+
+def build_question_enrichment(question: Dict[str, object]) -> Dict[str, object]:
+    topic_tags = extract_topic_tags(question)
+    adaptive_tags = extract_adaptive_tags(question)
+    release_tags = current_release_tags(adaptive_tags)
+    confusion_family = detect_confusion_family(question, topic_tags, adaptive_tags)
+    return {
+        "topic_tags": topic_tags,
+        "adaptive_tags": adaptive_tags,
+        "release_tags": release_tags,
+        "confusion_family": confusion_family,
+        "confusion_family_label": CONFUSION_FAMILIES.get(confusion_family or "", {}).get("label_ja"),
+        "doc_basis": build_doc_basis(question, adaptive_tags, release_tags, confusion_family),
+        "root_snippet": build_root_snippet(question, adaptive_tags, release_tags, confusion_family),
+        "similarity": question_similarity_meta(question, topic_tags, adaptive_tags),
+    }
+
+
+def build_exact_duplicate_metadata(questions: List[Dict[str, object]]) -> Tuple[Dict[str, Dict[str, object]], Dict[str, int]]:
+    groups: Dict[str, List[Dict[str, object]]] = {}
+    for question in questions:
+        signature = question.get("signature") or question["id"]
+        groups.setdefault(signature, []).append(question)
+
+    metadata: Dict[str, Dict[str, object]] = {}
+    duplicate_group_count = 0
+    duplicate_question_count = 0
+    largest_group = 1
+    for signature, members in groups.items():
+        ordered = sorted(members, key=lambda item: item["global_index"])
+        group_size = len(ordered)
+        if group_size > 1:
+            duplicate_group_count += 1
+            duplicate_question_count += group_size
+        largest_group = max(largest_group, group_size)
+        group_id = f"dup-{hashlib.sha1(str(signature).encode('utf-8')).hexdigest()[:10]}"
+        anchor_id = ordered[0]["id"]
+        for rank, question in enumerate(ordered, start=1):
+            metadata[question["id"]] = {
+                "duplicate_group_id": group_id,
+                "duplicate_group_size": group_size,
+                "duplicate_group_rank": rank,
+                "duplicate_group_anchor_id": anchor_id,
+                "exact_duplicate": group_size > 1,
+            }
+    summary = {
+        "group_count": duplicate_group_count,
+        "question_count": duplicate_question_count,
+        "largest_group": largest_group,
+    }
+    return metadata, summary
+
+
+def semantic_similarity_score(left: Dict[str, object], right: Dict[str, object]) -> float:
+    left_similarity = left["similarity"]
+    right_similarity = right["similarity"]
+    prompt_score = jaccard_score(left_similarity["prompt_ngrams"], right_similarity["prompt_ngrams"])
+    answer_score = jaccard_score(left_similarity["answer_ngrams"], right_similarity["answer_ngrams"])
+    choice_score = jaccard_score(left_similarity["choice_ngrams"], right_similarity["choice_ngrams"])
+    tag_score = jaccard_score(left_similarity["cluster_tags"], right_similarity["cluster_tags"])
+    seed_score = jaccard_score(left_similarity["seed_terms"], right_similarity["seed_terms"])
+    confusion_bonus = 0.08 if left.get("confusion_family") and left.get("confusion_family") == right.get("confusion_family") else 0.0
+    return min(
+        1.0,
+        prompt_score * 0.52
+        + answer_score * 0.18
+        + choice_score * 0.12
+        + tag_score * 0.10
+        + seed_score * 0.08
+        + confusion_bonus,
+    )
+
+
+def is_near_duplicate(left: Dict[str, object], right: Dict[str, object]) -> bool:
+    if left.get("duplicate_group_id") == right.get("duplicate_group_id"):
+        return True
+    left_similarity = left["similarity"]
+    right_similarity = right["similarity"]
+    prompt_score = jaccard_score(left_similarity["prompt_ngrams"], right_similarity["prompt_ngrams"])
+    answer_score = jaccard_score(left_similarity["answer_ngrams"], right_similarity["answer_ngrams"])
+    choice_score = jaccard_score(left_similarity["choice_ngrams"], right_similarity["choice_ngrams"])
+    tag_score = jaccard_score(left_similarity["cluster_tags"], right_similarity["cluster_tags"])
+    seed_score = jaccard_score(left_similarity["seed_terms"], right_similarity["seed_terms"])
+    total_score = semantic_similarity_score(left, right)
+    if prompt_score >= 0.86 and (answer_score >= 0.20 or choice_score >= 0.32):
+        return True
+    if prompt_score >= 0.74 and answer_score >= 0.34 and (tag_score >= 0.20 or seed_score >= 0.20):
+        return True
+    return total_score >= 0.78 and (answer_score >= 0.24 or choice_score >= 0.38 or tag_score >= 0.30)
+
+
+def build_semantic_cluster_metadata(
+    questions: List[Dict[str, object]],
+    enrichments: Dict[str, Dict[str, object]],
+) -> Tuple[Dict[str, Dict[str, object]], Dict[str, int]]:
+    parent = {question["id"]: question["id"] for question in questions}
+
+    def find(item_id: str) -> str:
+        while parent[item_id] != item_id:
+            parent[item_id] = parent[parent[item_id]]
+            item_id = parent[item_id]
+        return item_id
+
+    def union(left_id: str, right_id: str) -> None:
+        left_root = find(left_id)
+        right_root = find(right_id)
+        if left_root == right_root:
+            return
+        if left_root > right_root:
+            left_root, right_root = right_root, left_root
+        parent[right_root] = left_root
+
+    by_bucket: Dict[Tuple[str, int], List[Dict[str, object]]] = {}
+    for question in questions:
+        bucket_key = (question["top_domain"], int(question.get("choose_count", 1)))
+        by_bucket.setdefault(bucket_key, []).append(question)
+
+    for bucket in by_bucket.values():
+        ordered = sorted(bucket, key=lambda item: item["global_index"])
+        for index, left_question in enumerate(ordered):
+            left = enrichments[left_question["id"]]
+            for right_question in ordered[index + 1 :]:
+                right = enrichments[right_question["id"]]
+                if left["duplicate_group_id"] == right["duplicate_group_id"]:
+                    union(left_question["id"], right_question["id"])
+                    continue
+                shared_terms = set(left["similarity"]["seed_terms"][:6]) & set(right["similarity"]["seed_terms"][:6])
+                shared_tags = set(left["topic_tags"] + left["adaptive_tags"]) & set(right["topic_tags"] + right["adaptive_tags"])
+                same_family = left.get("confusion_family") and left.get("confusion_family") == right.get("confusion_family")
+                if not shared_terms and not shared_tags and not same_family:
+                    continue
+                if is_near_duplicate(left, right):
+                    union(left_question["id"], right_question["id"])
+
+    clusters: Dict[str, List[Dict[str, object]]] = {}
+    for question in sorted(questions, key=lambda item: item["global_index"]):
+        clusters.setdefault(find(question["id"]), []).append(question)
+
+    metadata: Dict[str, Dict[str, object]] = {}
+    cluster_count = 0
+    cluster_question_count = 0
+    largest_cluster = 1
+    for members in clusters.values():
+        ordered = sorted(members, key=lambda item: item["global_index"])
+        cluster_size = len(ordered)
+        if cluster_size > 1:
+            cluster_count += 1
+            cluster_question_count += cluster_size
+        largest_cluster = max(largest_cluster, cluster_size)
+        cluster_seed = "|".join(question["id"] for question in ordered[:4])
+        cluster_id = f"sem-{hashlib.sha1(cluster_seed.encode('utf-8')).hexdigest()[:10]}"
+        anchor_id = ordered[0]["id"]
+        anchor_enrichment = enrichments[anchor_id]
+        for rank, question in enumerate(ordered, start=1):
+            similarity_to_anchor = 1.0 if question["id"] == anchor_id else semantic_similarity_score(enrichments[question["id"]], anchor_enrichment)
+            metadata[question["id"]] = {
+                "semantic_cluster_id": cluster_id,
+                "semantic_cluster_size": cluster_size,
+                "semantic_cluster_rank": rank,
+                "semantic_cluster_anchor_id": anchor_id,
+                "semantic_similarity_to_anchor": round(similarity_to_anchor, 3),
+            }
+    summary = {
+        "cluster_count": cluster_count,
+        "question_count": cluster_question_count,
+        "largest_cluster": largest_cluster,
+    }
+    return metadata, summary
+
+
+def active_pool_score(question: Dict[str, object], item: Dict[str, object]) -> float:
+    score = 38.0
+    score += min(26.0, float(item["score"]) * 0.46)
+    score += min(8.0, len(item["topic_tags"]) * 1.7)
+    score += min(7.0, len(item["adaptive_tags"]) * 1.25)
+    score += min(5.0, len(item["release_tags"]) * 2.2)
+    if item.get("confusion_family"):
+        score += 5.0
+    if question.get("multi_select"):
+        score += 2.5
+    if question.get("source_status_correct") is False:
+        score += 3.0
+    if question["id"] != item.get("canonical_id"):
+        score -= 2.5
+    score -= min(12.0, max(0, int(item.get("duplicate_group_size", 1)) - 1) * 7.0)
+    score -= min(8.0, max(0, int(item.get("semantic_cluster_size", 1)) - 1) * 1.8)
+    return round(max(1.0, min(99.0, score)), 2)
+
+
 def scenario_question(question: Dict[str, object]) -> bool:
     prompt = question.get("prompt_ja", "")
     return len(prompt) >= 70 or prompt.startswith(("あなたは", "ある", "企業", "大手", "国際", "多国籍"))
@@ -1697,9 +2219,10 @@ def narrow_scope_hits(question: Dict[str, object]) -> List[str]:
     return [pattern for pattern in NARROW_SCOPE_PATTERNS if pattern in blob]
 
 
-def curation_score(question: Dict[str, object]) -> Tuple[float, List[str], List[str]]:
+def curation_score(question: Dict[str, object], enrichment: Optional[Dict[str, object]] = None) -> Tuple[float, List[str], List[str]]:
     score = 0.0
     reasons: List[str] = []
+    enrichment = enrichment or build_question_enrichment(question)
 
     if question["source_set"] >= 10:
         score += 24.0
@@ -1742,18 +2265,21 @@ def curation_score(question: Dict[str, object]) -> Tuple[float, List[str], List[
     if question.get("source_status_correct") is False:
         score += 2.0
 
-    topic_tags = extract_topic_tags(question)
+    topic_tags = list(enrichment.get("topic_tags", []))
     if topic_tags:
         score += min(12.0, len(topic_tags) * 3.0)
         reasons.append("コア論点: " + ", ".join(topic_tags[:3]))
     else:
         score -= 4.0
 
-    adaptive_tags = extract_adaptive_tags(question)
-    release_tags = current_release_tags(adaptive_tags)
+    release_tags = list(enrichment.get("release_tags", []))
     if release_tags:
         score += min(10.0, len(release_tags) * 4.0)
         reasons.append("2026現行トピック: " + ", ".join(release_tags[:2]))
+
+    if enrichment.get("confusion_family"):
+        score += 4.0
+        reasons.append("混同しやすい概念セット")
 
     narrow_hits = narrow_scope_hits(question)
     if narrow_hits:
@@ -1762,7 +2288,7 @@ def curation_score(question: Dict[str, object]) -> Tuple[float, List[str], List[
     return score, reasons[:4], topic_tags
 
 
-def cluster_key(question: Dict[str, object], topic_tags: List[str]) -> str:
+def cluster_key(question: Dict[str, object], topic_tags: List[str], confusion_family: Optional[str] = None) -> str:
     correct_texts = [
         choice.get("text_ja", "")
         for choice in question.get("choices", [])
@@ -1770,7 +2296,8 @@ def cluster_key(question: Dict[str, object], topic_tags: List[str]) -> str:
     ]
     answer_key = normalize_key(" | ".join(correct_texts))[:120]
     tag_key = "|".join(sorted(topic_tags)[:3])
-    return f"{question['top_domain']}|{tag_key}|{answer_key}"
+    confusion_key = confusion_family or "-"
+    return f"{question['top_domain']}|{confusion_key}|{tag_key}|{answer_key}"
 
 
 def study_plan(curated_questions: List[Dict[str, object]], days: int, daily_hours: float) -> Dict[str, object]:
@@ -1871,11 +2398,22 @@ def study_plan(curated_questions: List[Dict[str, object]], days: int, daily_hour
 
 def build_curated_payload(payload: Dict[str, object], count: int, days: int, daily_hours: float) -> Dict[str, object]:
     quotas = domain_targets(count)
+    bounds = active_pool_bounds(count)
+    enrichments = {question["id"]: build_question_enrichment(question) for question in payload["questions"]}
+    exact_duplicate_meta, exact_duplicate_summary = build_exact_duplicate_metadata(payload["questions"])
+    for question_id, metadata in exact_duplicate_meta.items():
+        enrichments[question_id].update(metadata)
+    semantic_cluster_meta, semantic_cluster_summary = build_semantic_cluster_metadata(payload["questions"], enrichments)
+    for question_id, metadata in semantic_cluster_meta.items():
+        enrichments[question_id].update(metadata)
+
     scored = []
     for question in payload["questions"]:
-        score, reasons, topic_tags = curation_score(question)
-        adaptive_tags = extract_adaptive_tags(question)
-        release_tags = current_release_tags(adaptive_tags)
+        enrichment = enrichments[question["id"]]
+        score, reasons, topic_tags = curation_score(question, enrichment)
+        adaptive_tags = list(enrichment["adaptive_tags"])
+        release_tags = list(enrichment["release_tags"])
+        current_relevance_score = round(min(1.0, 0.22 + len(release_tags) * 0.22), 2)
         scored.append(
             {
                 "question": question,
@@ -1884,23 +2422,58 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "topic_tags": topic_tags,
                 "adaptive_tags": adaptive_tags,
                 "release_tags": release_tags,
+                "confusion_family": enrichment.get("confusion_family"),
+                "confusion_family_label": enrichment.get("confusion_family_label"),
+                "doc_basis": enrichment["doc_basis"],
+                "root_snippet": enrichment["root_snippet"],
+                "current_relevance_score": current_relevance_score,
                 "base_difficulty": base_difficulty_seed(question, adaptive_tags),
-                "cluster_key": cluster_key(question, topic_tags),
+                "cluster_key": cluster_key(question, topic_tags, enrichment.get("confusion_family")),
+                "duplicate_group_id": enrichment["duplicate_group_id"],
+                "duplicate_group_size": enrichment["duplicate_group_size"],
+                "duplicate_group_rank": enrichment["duplicate_group_rank"],
+                "duplicate_group_anchor_id": enrichment["duplicate_group_anchor_id"],
+                "semantic_cluster_id": enrichment["semantic_cluster_id"],
+                "semantic_cluster_size": enrichment["semantic_cluster_size"],
+                "semantic_cluster_rank": enrichment["semantic_cluster_rank"],
+                "semantic_cluster_anchor_id": enrichment["semantic_cluster_anchor_id"],
+                "semantic_similarity_to_anchor": enrichment["semantic_similarity_to_anchor"],
             }
         )
+
+    ranking_order = sorted(
+        scored,
+        key=lambda item: (-item["score"], -item["question"]["source_set"], item["question"]["global_index"]),
+    )
+    semantic_canonical: Dict[str, str] = {}
+    duplicate_canonical: Dict[str, str] = {}
+    for item in ranking_order:
+        semantic_canonical.setdefault(item["semantic_cluster_id"], item["question"]["id"])
+        duplicate_canonical.setdefault(item["duplicate_group_id"], item["question"]["id"])
+    for item in scored:
+        item["canonical_id"] = semantic_canonical[item["semantic_cluster_id"]]
+        item["duplicate_canonical_id"] = duplicate_canonical[item["duplicate_group_id"]]
+        item["active_pool_score"] = active_pool_score(item["question"], item)
 
     by_domain: Dict[str, List[Dict[str, object]]] = {key: [] for key in TOP_DOMAINS}
     for item in scored:
         by_domain[item["question"]["top_domain"]].append(item)
     for domain_key in by_domain:
         by_domain[domain_key].sort(
-            key=lambda item: (-item["score"], -item["question"]["source_set"], item["question"]["global_index"])
+            key=lambda item: (
+                -item["active_pool_score"],
+                -item["score"],
+                -item["question"]["source_set"],
+                item["question"]["global_index"],
+            )
         )
 
     selected: List[Dict[str, object]] = []
     selected_ids = set()
+    selected_duplicate_groups = set()
     domain_counts = {key: 0 for key in TOP_DOMAINS}
     cluster_counts: Dict[str, int] = {}
+    semantic_cluster_counts: Dict[str, int] = {}
 
     for cluster_cap in (1, 2, 99):
         for domain_key, target in quotas.items():
@@ -1912,21 +2485,55 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 question = item["question"]
                 if question["id"] in selected_ids:
                     continue
+                if item["duplicate_group_id"] in selected_duplicate_groups:
+                    continue
+                current_semantic_cluster_count = semantic_cluster_counts.get(item["semantic_cluster_id"], 0)
+                if current_semantic_cluster_count >= cluster_cap:
+                    continue
                 current_cluster_count = cluster_counts.get(item["cluster_key"], 0)
                 if current_cluster_count >= cluster_cap:
                     continue
                 cluster_counts[item["cluster_key"]] = current_cluster_count + 1
+                semantic_cluster_counts[item["semantic_cluster_id"]] = current_semantic_cluster_count + 1
                 domain_counts[domain_key] += 1
                 selected_ids.add(question["id"])
+                selected_duplicate_groups.add(item["duplicate_group_id"])
                 selected.append(item)
+
+    active_ranked = sorted(
+        selected,
+        key=lambda item: (-item["active_pool_score"], -item["score"], item["question"]["global_index"]),
+    )
+    active_rank_lookup: Dict[str, int] = {}
+    active_band_lookup: Dict[str, str] = {}
+    for rank, item in enumerate(active_ranked, start=1):
+        active_rank_lookup[item["question"]["id"]] = rank
+        if rank <= bounds["min_size"]:
+            band = "foundation"
+        elif rank <= bounds["default_size"]:
+            band = "core"
+        elif rank <= bounds["max_size"]:
+            band = "stretch"
+        else:
+            band = "reserve"
+        active_band_lookup[item["question"]["id"]] = band
 
     selected_questions = []
     for curated_index, item in enumerate(selected, start=1):
         question = item["question"]
+        explanation = build_explanation_ja(question, item["adaptive_tags"], item["release_tags"])
         selected_questions.append(
             {
                 "curated_index": curated_index,
                 "id": question["id"],
+                "canonical_id": item["canonical_id"],
+                "duplicate_group_id": item["duplicate_group_id"],
+                "duplicate_group_size": item["duplicate_group_size"],
+                "semantic_cluster_id": item["semantic_cluster_id"],
+                "semantic_cluster_size": item["semantic_cluster_size"],
+                "semantic_similarity_to_anchor": item["semantic_similarity_to_anchor"],
+                "confusion_family": item["confusion_family"],
+                "confusion_family_label": item["confusion_family_label"],
                 "prompt": question["prompt_ja"],
                 "original_prompt": question["prompt"],
                 "language": question["language"],
@@ -1944,22 +2551,58 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "correct_choice_ids": question["correct_choice_ids"],
                 "multi_select": question["multi_select"],
                 "choose_count": question["choose_count"],
-                "explanation": build_explanation_ja(question, item["adaptive_tags"], item["release_tags"]),
+                "explanation": explanation,
                 "original_explanation": question["overall_explanation"],
+                "root_snippet": item["root_snippet"],
+                "doc_basis": item["doc_basis"],
                 "docs": docs_for_question(question),
                 "yield_score": round(item["score"], 2),
                 "yield_reasons": item["reasons"],
                 "topic_tags": item["topic_tags"],
                 "concept_tags": item["adaptive_tags"],
                 "current_service_tags": item["release_tags"],
-                "current_relevance_score": round(min(1.0, 0.22 + len(item["release_tags"]) * 0.22), 2),
+                "current_relevance_score": item["current_relevance_score"],
+                "delta_relevance_score": round(min(0.15, 0.05 + len(item["release_tags"]) * 0.05), 3),
                 "base_difficulty": item["base_difficulty"],
                 "exam_weight": TOP_DOMAINS[question["top_domain"]]["weight"],
+                "active_pool_score": item["active_pool_score"],
+                "active_pool_rank": active_rank_lookup[question["id"]],
+                "active_pool_band": active_band_lookup[question["id"]],
+                "default_active": active_rank_lookup[question["id"]] <= bounds["default_size"],
+                "delta_mode": {
+                    "enabled": True,
+                    "release_tags": item["release_tags"],
+                    "relevance_score": round(min(0.15, 0.05 + len(item["release_tags"]) * 0.05), 3),
+                    "weight_fraction_cap": 0.15,
+                },
+                "shadow_log_context": {
+                    "question_id": question["id"],
+                    "canonical_id": item["canonical_id"],
+                    "duplicate_group_id": item["duplicate_group_id"],
+                    "semantic_cluster_id": item["semantic_cluster_id"],
+                    "domain_key": question["top_domain"],
+                    "topic_tags": item["topic_tags"],
+                    "concept_tags": item["adaptive_tags"],
+                    "current_service_tags": item["release_tags"],
+                    "confusion_family": item["confusion_family"],
+                    "base_difficulty": item["base_difficulty"],
+                    "active_pool_score": item["active_pool_score"],
+                    "active_pool_rank": active_rank_lookup[question["id"]],
+                },
                 "source_set": question["source_set"],
                 "source_number": question["source_number"],
                 "source_status_correct": question["source_status_correct"],
             }
         )
+
+    confusion_counts_raw: Dict[str, int] = {}
+    confusion_counts_curated: Dict[str, int] = {}
+    for item in scored:
+        if item.get("confusion_family"):
+            confusion_counts_raw[item["confusion_family"]] = confusion_counts_raw.get(item["confusion_family"], 0) + 1
+    for question in selected_questions:
+        if question.get("confusion_family"):
+            confusion_counts_curated[question["confusion_family"]] = confusion_counts_curated.get(question["confusion_family"], 0) + 1
 
     domain_inventory = []
     for domain_key, target in quotas.items():
@@ -1972,6 +2615,16 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "weight": TOP_DOMAINS[domain_key]["weight"],
                 "target_count": target,
                 "actual_count": len(picked),
+                "active_pool_targets": {
+                    "min_size": domain_targets(bounds["min_size"])[domain_key],
+                    "default_size": domain_targets(bounds["default_size"])[domain_key],
+                    "max_size": domain_targets(bounds["max_size"])[domain_key],
+                },
+                "active_pool_actual": {
+                    "min_size": sum(1 for question in picked if question["active_pool_rank"] <= bounds["min_size"]),
+                    "default_size": sum(1 for question in picked if question["active_pool_rank"] <= bounds["default_size"]),
+                    "max_size": sum(1 for question in picked if question["active_pool_rank"] <= bounds["max_size"]),
+                },
             }
         )
 
@@ -1982,16 +2635,63 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
         "selection_policy": [
             "2026年1月更新の公式CSAブループリント配分で600問に圧縮",
             "高品質バンク・学習領域メタデータ・解説の厚さを優先",
-            "2026年4月時点の現行ServiceNow文脈に近いトピックを追加加点",
-            "コア論点の被りを抑えつつ、弱点化しやすい複数選択を少し厚めに採用",
-            "2週間・1日2-3時間の前提で回せる量に制限",
+            "署名ベース完全重複は1代表に抑え、軽量ローカル類似度で近似重複も分散",
+            "混同しやすい概念セットと2026年4月時点の現行ServiceNow文脈に追加加点",
+            "600問は上限プールとし、実運用のアクティブ学習セットは420〜560問、初期推奨は480問",
+            "2週間・1日2-3時間で回せるよう、複数選択と弱点化しやすい論点を少し厚めに採用",
         ],
         "official_context": OFFICIAL_EXAM_CONTEXT,
+        "delta_mode": {
+            "enabled": True,
+            "label": "CSA 2026 Delta Mode",
+            "release_family": OFFICIAL_EXAM_CONTEXT["current_release_family"],
+            "release_updated": OFFICIAL_EXAM_CONTEXT["current_release_updated"],
+            "exam_blueprint_updated": OFFICIAL_EXAM_CONTEXT["exam_blueprint_updated"],
+            "focus_tags": OFFICIAL_EXAM_CONTEXT["exam_priority_topics"],
+            "weight_fraction_cap": 0.15,
+        },
+        "shadow_log_schema": {
+            "version": 1,
+            "question_context_fields": [
+                "question_id",
+                "canonical_id",
+                "duplicate_group_id",
+                "semantic_cluster_id",
+                "domain_key",
+                "topic_tags",
+                "concept_tags",
+                "current_service_tags",
+                "confusion_family",
+                "base_difficulty",
+                "active_pool_score",
+                "active_pool_rank",
+            ],
+            "attempt_event_fields": [
+                "question_id",
+                "presented_at",
+                "submitted_at",
+                "selected_choice_ids",
+                "is_correct",
+                "confidence_label",
+                "hint_count",
+                "predicted_recall_before",
+                "predicted_recall_after",
+                "working_set_size",
+            ],
+        },
         "meta": {
             "curated_count": len(selected_questions),
+            "curated_cap": count,
             "full_question_count": payload["question_count"],
             "study_days": days,
             "daily_hours": daily_hours,
+            "active_pool_bounds": bounds,
+            "duplicate_summary": {
+                "exact": exact_duplicate_summary,
+                "semantic": semantic_cluster_summary,
+            },
+            "confusion_family_counts_raw": confusion_counts_raw,
+            "confusion_family_counts_curated": confusion_counts_curated,
         },
         "domains": domain_inventory,
         "plan": plan,

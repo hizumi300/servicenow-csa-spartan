@@ -8,7 +8,7 @@
       name="description"
       content="ServiceNow CSA向けに1434問から600問へ圧縮した、2週間スパルタ学習アプリ。"
     >
-    <link rel="stylesheet" href="./styles.css">
+    <link rel="stylesheet" href="./styles.css?v=20260428-ml3">
   </head>
   <body>
     <div class="app-shell">
@@ -85,8 +85,16 @@
             </article>
             <article class="panel">
               <div class="panel-head">
-                <h2>選抜ロジック</h2>
+                <h2>アクティブワーキングセット</h2>
+                <button id="reset-active-pool" class="mini-button">自動</button>
               </div>
+              <div class="controls controls-compact">
+                <label class="field range-field" for="active-set-size">
+                  <span>稼働セット <strong id="active-set-value">480問</strong></span>
+                  <input id="active-set-size" type="range" min="420" max="560" step="20" value="480">
+                </label>
+              </div>
+              <div id="active-pool-summary" class="stack"></div>
               <ul id="selection-policy" class="plain-list"></ul>
             </article>
           </div>
@@ -105,6 +113,23 @@
               <div id="weak-concepts" class="stack"></div>
             </article>
           </div>
+
+          <div class="grid-two">
+            <article class="panel">
+              <div class="panel-head">
+                <h2>混同対比キュー</h2>
+              </div>
+              <div id="contrastive-summary" class="stack"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h2>2026 Delta / Shadow KT</h2>
+                <button id="export-shadow-log" class="mini-button">JSONL出力</button>
+              </div>
+              <div id="delta-mode-summary" class="stack"></div>
+              <div id="shadow-telemetry" class="stack muted telemetry-stack"></div>
+            </article>
+          </div>
         </section>
 
         <section id="view-drill" class="view">
@@ -119,6 +144,7 @@
                 <select id="drill-mode">
                   <option value="mixed">全範囲</option>
                   <option value="focus">分野集中</option>
+                  <option value="contrastive">混同対比</option>
                 </select>
               </label>
               <label class="field">
@@ -142,6 +168,8 @@
             </div>
             <div id="hint-box" class="hint-box hidden"></div>
             <div id="result-box" class="result-box hidden"></div>
+            <div id="confidence-box" class="confidence-box hidden"></div>
+            <div id="contrastive-box" class="hint-box hidden"></div>
           </article>
         </section>
 
@@ -162,9 +190,11 @@
 
           <article class="panel question-panel">
             <div id="mock-progress" class="question-meta"></div>
+            <div id="mock-strategy-strip" class="question-meta"></div>
             <div id="mock-question" class="question-card empty">
               <p>まだ始まっていない。始めろ。</p>
             </div>
+            <div id="mock-confidence-box" class="confidence-box hidden"></div>
             <div class="question-actions">
               <button id="mock-prev" class="ghost-button small" disabled>前へ</button>
               <button id="mock-save" class="primary-button small" disabled>回答を保存</button>
@@ -194,6 +224,6 @@
       </main>
     </div>
 
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="./app.js?v=20260428-ml3"></script>
   </body>
 </html>

@@ -1,5 +1,5 @@
 const DATA_URL = "./data/csa600.json";
-const STORAGE_KEYS = ["csaSpartanState:v3", "csaSpartanState:v2"];
+const STORAGE_KEYS = ["csaSpartanState:v4", "csaSpartanState:v3", "csaSpartanState:v2"];
 const STORAGE_KEY = STORAGE_KEYS[0];
 const TARGET_RECALL = 0.62;
 const BASE_LR = 0.18;
@@ -8,6 +8,7 @@ const ACTIVE_SET_MAX = 560;
 const ACTIVE_SET_STEP = 20;
 const ACTIVE_SET_DEFAULT = 480;
 const SHADOW_LOG_LIMIT = 240;
+const SHADOW_STORAGE_KEY = "csaSpartanShadow:v1";
 
 const CONFIDENCE_META = {
   confident: { label: "自信あり" },
@@ -60,6 +61,7 @@ const state = {
   currentContrastiveItem: null,
   currentQuestionLocked: false,
   currentQuestionFeedback: null,
+  currentQuestionServedAt: null,
   hintLevel: 0,
   mockTimerHandle: null,
 };
@@ -71,6 +73,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   await loadDataset();
   loadUserState();
+  hydrateShadowLog();
   ensureSprintStart();
   sanitizeUserState();
   renderAll();
@@ -194,6 +197,7 @@ function bindEvents() {
     state.currentContrastiveItem = null;
     state.currentQuestionLocked = false;
     state.currentQuestionFeedback = null;
+    state.currentQuestionServedAt = null;
     state.hintLevel = 0;
     ensureSprintStart();
     saveUserState();
@@ -267,7 +271,7 @@ function defaultFamilyRecord() {
 
 function defaultUserState() {
   return {
-    version: 3,
+    version: 4,
     startedAt: null,
     attempts: {},
     learner: {
@@ -275,6 +279,12 @@ function defaultUserState() {
       domainTheta: {},
       conceptTheta: {},
       questionBias: {},
+      questionDifficulty: {},
+      questionDiscrimination: {},
+    },
+    bandit: {
+      totalPulls: 0,
+      arms: {},
     },
     preferences: {
       activeWorkingSetSize: null,
@@ -367,6 +377,22 @@ function migrateState(raw) {
     learner: {
       ...base.learner,
       ...(raw?.learner || {}),
+      questionDifficulty: {
+        ...base.learner.questionDifficulty,
+        ...(raw?.learner?.questionDifficulty || {}),
+      },
+      questionDiscrimination: {
+        ...base.learner.questionDiscrimination,
+        ...(raw?.learner?.questionDiscrimination || {}),
+      },
+    },
+    bandit: {
+      ...base.bandit,
+      ...(raw?.bandit || {}),
+      arms: {
+        ...base.bandit.arms,
+        ...(raw?.bandit?.arms || {}),
+      },
     },
     preferences: {
       ...base.preferences,
@@ -416,7 +442,7 @@ function migrateState(raw) {
 
   next.contrastiveQueue = normalizeContrastiveQueue(raw?.contrastiveQueue);
   next.mockSession = normalizeMockSession(raw?.mockSession);
-  next.version = 3;
+  next.version = 4;
   return next;
 }
 
@@ -436,6 +462,15 @@ function loadUserState() {
 
 function saveUserState() {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state.user));
+}
+
+function hydrateShadowLog() {
+  try {
+    const raw = window.localStorage.getItem(SHADOW_STORAGE_KEY);
+    window.__CSA_SHADOW_LOG__ = raw ? JSON.parse(raw) : [];
+  } catch {
+    window.__CSA_SHADOW_LOG__ = [];
+  }
 }
 
 function sanitizeUserState() {
@@ -550,6 +585,80 @@ function confidenceChoicesForMock() {
     { key: "unsure", label: "迷った" },
     { key: "guess", label: "勘" },
   ];
+}
+
+function defaultBanditArm() {
+  return {
+    pulls: 0,
+    rewardSum: 0,
+    correctSum: 0,
+    recentRewards: [],
+  };
+}
+
+function banditArm(key) {
+  return state.user.bandit.arms[key] || defaultBanditArm();
+}
+
+function banditContextKeys(question) {
+  const keys = [
+    `question:${question.id}`,
+    `domain:${question.domain_key}`,
+    question.confusion_family ? `family:${question.confusion_family}` : null,
+    question.canonical_id ? `canonical:${question.canonical_id}` : null,
+    ...(question.concept_tags || []).slice(0, 3).map((tag) => `concept:${tag}`),
+  ];
+  return unique(keys);
+}
+
+function banditDetailForQuestion(question, signals = null) {
+  const detail = signals || questionSignals(question);
+  const totalPulls = Math.max(1, state.user.bandit.totalPulls || 0);
+  const contexts = banditContextKeys(question);
+  const weighted = contexts.map((key, index) => {
+    const arm = banditArm(key);
+    const meanReward = arm.pulls ? arm.rewardSum / arm.pulls : 0.56;
+    const uncertainty = Math.sqrt((2 * Math.log(totalPulls + 2)) / (arm.pulls + 1));
+    const weight = index === 0 ? 0.34 : key.startsWith("family:") ? 0.2 : key.startsWith("concept:") ? 0.15 : 0.11;
+    return {
+      key,
+      weight,
+      meanReward,
+      uncertainty,
+    };
+  });
+
+  const weightSum = weighted.reduce((sum, item) => sum + item.weight, 0) || 1;
+  const expectedReward = weighted.reduce((sum, item) => sum + item.meanReward * item.weight, 0) / weightSum;
+  const uncertaintyBonus = weighted.reduce((sum, item) => sum + item.uncertainty * item.weight, 0) / weightSum;
+  const irtGainPotential =
+    clamp(1 - Math.abs(detail.model.knowledgeProb - 0.64) / 0.64, 0, 1) * 0.42 +
+    clamp(1 - detail.model.predictedRecall, 0, 1) * 0.38 +
+    detail.confusionPressure * 0.12 +
+    detail.confidencePressure * 0.08;
+
+  return {
+    contexts,
+    expectedReward,
+    uncertaintyBonus,
+    irtGainPotential,
+    score: expectedReward * 22 + uncertaintyBonus * 16 + irtGainPotential * 28,
+  };
+}
+
+function updateBanditState(question, reward, correct) {
+  state.user.bandit.totalPulls = (state.user.bandit.totalPulls || 0) + 1;
+  banditContextKeys(question).forEach((key) => {
+    const arm = {
+      ...defaultBanditArm(),
+      ...banditArm(key),
+    };
+    arm.pulls += 1;
+    arm.rewardSum += reward;
+    arm.correctSum += correct ? 1 : 0;
+    arm.recentRewards = [...(arm.recentRewards || []), reward].slice(-12);
+    state.user.bandit.arms[key] = arm;
+  });
 }
 
 function activePoolConfig() {
@@ -684,16 +793,24 @@ function questionModel(question, atMs = Date.now()) {
   const conceptThetas = (question.concept_tags || []).map((tag) => learner.conceptTheta[tag] || 0);
   const conceptTheta = average(conceptThetas, 0);
   const questionBias = learner.questionBias[question.id] || 0;
+  const adaptiveDifficulty = question.irt_difficulty ?? question.base_difficulty ?? 0.5;
+  const adaptiveDiscrimination = question.irt_discrimination ?? 1.0;
+  const adaptiveGuess = question.irt_guess ?? 0.08;
+  const difficultyDrift = learner.questionDifficulty[question.id] || 0;
+  const discriminationDrift = learner.questionDiscrimination[question.id] || 0;
+  const effectiveDifficulty = clamp(adaptiveDifficulty + difficultyDrift, 0.18, 1.15);
+  const effectiveDiscrimination = clamp(adaptiveDiscrimination + discriminationDrift, 0.75, 2.6);
 
   const rawAbility =
     learner.overallTheta +
-    domainTheta * 0.75 +
-    conceptTheta * 0.82 -
-    question.base_difficulty * 1.9 -
-    questionBias;
+    domainTheta * 0.78 +
+    conceptTheta * 0.86 -
+    effectiveDifficulty * 1.9 -
+    questionBias * 0.35;
 
-  const knowledgeProb = sigmoid(rawAbility);
-  const masteryProb = clamp(0.18 + knowledgeProb * 0.82, 0.18, 0.98);
+  const latentProb = sigmoid(effectiveDiscrimination * rawAbility);
+  const knowledgeProb = clamp(adaptiveGuess + (1 - adaptiveGuess) * latentProb, 0.03, 0.99);
+  const masteryProb = clamp(0.14 + knowledgeProb * 0.86, 0.14, 0.99);
   const halfLifeHours = record.halfLifeHours || initialHalfLife(question);
   const elapsedHours = record.lastSeenAt ? Math.max(0, (atMs - new Date(record.lastSeenAt).getTime()) / 3600000) : 0;
   const retrievability = record.lastSeenAt ? Math.pow(0.5, elapsedHours / halfLifeHours) : 1;
@@ -714,6 +831,10 @@ function questionModel(question, atMs = Date.now()) {
     domainTheta,
     conceptTheta,
     questionBias,
+    irtDifficulty: effectiveDifficulty,
+    irtDiscrimination: effectiveDiscrimination,
+    irtGuess: adaptiveGuess,
+    uncertainty: 1 / Math.sqrt(record.total + 1),
   };
 }
 
@@ -1040,6 +1161,7 @@ function activePoolScoreForQuestion(question, signals = null) {
 function recommendationForQuestion(question, domainKey = null, domainLookup = null, options = {}) {
   const detail = questionSignals(question, domainKey, domainLookup);
   const poolInfo = activePoolScoreForQuestion(question, detail);
+  const bandit = banditDetailForQuestion(question, detail);
   const contrastiveItem = state.user.contrastiveQueue.find((item) => item.questionId === question.id) || null;
   const contrastiveBoost = contrastiveItem ? 0.72 : 0;
   const contrastiveMode = options.mode === "contrastive";
@@ -1054,6 +1176,7 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
     detail.confusionPressure * 12 +
     (question.current_relevance_score || 0) * 12 +
     detail.deltaBoost * 12 +
+    bandit.score +
     contrastiveBoost * 22 +
     (contrastiveMode ? detail.confusionPressure * 18 + contrastiveBoost * 18 : 0);
 
@@ -1061,6 +1184,8 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
   if (contrastiveItem) reasons.push(`混同対比: ${contrastiveItem.reason}`);
   if (detail.confusionPressure >= 0.72) reasons.push("混同ファミリーの取り違えを矯正");
   if (detail.confidencePressure >= 0.62) reasons.push("自信と実力のズレを補正");
+  if (bandit.uncertaintyBonus >= 1.1) reasons.push("contextual bandit が探索価値ありと判定");
+  if (bandit.irtGainPotential >= 0.7) reasons.push("IRT上の学習利得が大きい");
   if (detail.record.total > 0 && detail.model.dueInHours <= 0) reasons.push("忘却曲線上、今が復習タイミング");
   if (detail.delta.active || (question.current_relevance_score || 0) >= 0.45) reasons.push("現行リリース差分を優先");
   if (detail.record.total === 0) reasons.push("未着手の高優先問題");
@@ -1077,6 +1202,7 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
     backendPoolScore: poolInfo.backendScore,
     confidencePressure: detail.confidencePressure,
     confusionPressure: detail.confusionPressure,
+    bandit,
     delta: detail.delta,
     contrastiveItem,
   };
@@ -1277,6 +1403,17 @@ function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
     learner.conceptTheta[tag] = (learner.conceptTheta[tag] || 0) + error * lr * (0.9 / Math.max(1, question.concept_tags.length));
   });
   learner.questionBias[question.id] = (learner.questionBias[question.id] || 0) + (-error) * lr * 0.42;
+  learner.questionDifficulty[question.id] = clamp(
+    (learner.questionDifficulty[question.id] || 0) + (-error) * lr * 0.12,
+    -0.45,
+    0.45
+  );
+  learner.questionDiscrimination[question.id] = clamp(
+    (learner.questionDiscrimination[question.id] || 0) +
+      ((Math.abs(error) > 0.18 ? 1 : -1) * lr * 0.04 + (confidenceKey === "confident" && !correct ? 0.02 : 0)),
+    -0.35,
+    0.5
+  );
 
   const prevHalfLife = record.halfLifeHours || initialHalfLife(question);
   const desirableDifficulty = clamp(1 + (0.68 - before.predictedRecall) * 0.45, 0.82, 1.28);
@@ -1333,6 +1470,12 @@ function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
   consumeContrastiveItem(question.id);
   const queued = queueContrastiveItems(question, correct, confidenceKey);
   const after = questionModel(question);
+  const reward =
+    clamp(after.predictedRecall - before.predictedRecall + (correct ? 0.16 : -0.08), -0.3, 0.6) +
+    clamp(profile.observed - 0.5, -0.2, 0.22) +
+    (confidenceKey === "confident" && !correct ? 0.06 : 0) +
+    (confidenceKey === "guess" && correct ? 0.05 : 0);
+  updateBanditState(question, reward, correct);
   saveUserState();
 
   shadowLog("drill_answer_recorded", {
@@ -1340,10 +1483,21 @@ function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
     correct,
     confidenceKey,
     hintsUsed,
+    selectedChoiceIds: userIds,
+    presentedAt: state.currentQuestionServedAt,
+    submittedAt: nowIso(),
     source: state.currentQuestionSource,
     contrastiveFrom: state.currentContrastiveItem?.sourceQuestionId || null,
     familyKey,
+    predictedRecallBefore: before.predictedRecall,
+    predictedRecallAfter: after.predictedRecall,
+    knowledgeProbBefore: before.knowledgeProb,
+    knowledgeProbAfter: after.knowledgeProb,
+    irtDifficulty: after.irtDifficulty,
+    irtDiscrimination: after.irtDiscrimination,
+    banditReward: reward,
     queuedQuestionIds: queued.map((item) => item.id),
+    ...shadowQuestionMeta(question),
   });
 
   return {
@@ -1353,6 +1507,7 @@ function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
     hintsUsed,
     confidenceKey,
     familyKey,
+    reward,
     queued,
   };
 }
@@ -1607,6 +1762,7 @@ function renderNextPreview() {
     <div>${escapeHtml(shortSnippet(question.prompt, 120))}</div>
     <div>予測再現率 ${Math.round(rec.model.predictedRecall * 100)}% / 稼働順位 #${activePoolRank(question.id) || "-"} / 優先度 ${Math.round(rec.activePoolScore)}</div>
     <div class="muted">推奨理由: ${rec.reasons.join(" / ")}</div>
+    <div class="muted">bandit ${Math.round(rec.bandit.expectedReward * 100)} / UCB ${Math.round(rec.bandit.uncertaintyBonus * 100)} / IRT利得 ${Math.round(rec.bandit.irtGainPotential * 100)}</div>
     <div class="muted">出所: ${source === "contrastive" ? "混同キュー" : "稼働ワーキングセット"}${rec.delta.active ? ` | ${rec.delta.label}` : ""}</div>
   `;
   els["next-preview"].appendChild(card);
@@ -1805,6 +1961,7 @@ function loadNextDrillQuestion() {
   state.currentContrastiveItem = next.queueItem || next.rec.contrastiveItem || null;
   state.currentQuestionLocked = false;
   state.currentQuestionFeedback = null;
+  state.currentQuestionServedAt = nowIso();
   state.hintLevel = 0;
   renderCurrentQuestion();
   shadowLog("drill_question_served", {
@@ -1860,6 +2017,7 @@ function renderCurrentQuestion() {
     <div>${rec.reasons.join(" / ")}</div>
     <div class="muted">概念: ${(question.concept_tags || []).map(conceptLabelJa).join(" / ") || "未分類"} | 現行トピック: ${(question.current_service_tags || []).map(conceptLabelJa).join(" / ") || "なし"}</div>
     <div class="muted">混同キー: ${escapeHtml(familyKey)} | 自信圧 ${Math.round(rec.confidencePressure * 100)} / 混同圧 ${Math.round(rec.confusionPressure * 100)}</div>
+    <div class="muted">IRT難度 ${rec.model.irtDifficulty.toFixed(2)} / 識別力 ${rec.model.irtDiscrimination.toFixed(2)} / bandit利得 ${Math.round(rec.bandit.expectedReward * 100)} / 探索 ${Math.round(rec.bandit.uncertaintyBonus * 100)}</div>
     ${questionEvidenceHtml(question)}
   `;
 
@@ -2558,6 +2716,8 @@ function shadowQuestionMeta(question) {
     semanticClusterId: question.semantic_cluster_id || null,
     confusionFamily: question.confusion_family || null,
     activePoolScore: backendActivePoolScore(question),
+    irtDifficulty: question.irt_difficulty ?? question.base_difficulty ?? null,
+    irtDiscrimination: question.irt_discrimination ?? null,
     deltaActive: deltaMetadata(question).active,
   };
 }
@@ -2572,6 +2732,7 @@ function shadowLog(type, payload = {}) {
 
   try {
     window.__CSA_SHADOW_LOG__ = [...(window.__CSA_SHADOW_LOG__ || []), entry].slice(-SHADOW_LOG_LIMIT);
+    window.localStorage.setItem(SHADOW_STORAGE_KEY, JSON.stringify(window.__CSA_SHADOW_LOG__));
     window.dispatchEvent(new CustomEvent("csa-shadow-log", { detail: entry }));
     if (typeof window.__CSA_SHADOW_HOOK__ === "function") {
       window.__CSA_SHADOW_HOOK__(entry);

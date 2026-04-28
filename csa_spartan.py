@@ -5,6 +5,7 @@ import argparse
 import difflib
 import hashlib
 import json
+import math
 import random
 import re
 import subprocess
@@ -12,8 +13,15 @@ import sys
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote_plus
+
+import numpy as np
+import torch
+from scipy.sparse import hstack
+from sklearn.decomposition import TruncatedSVD
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
 
 ROOT = Path(__file__).resolve().parent
@@ -21,6 +29,8 @@ RUNTIME_DIR = ROOT / ".csa_spartan"
 QUESTIONS_PATH = RUNTIME_DIR / "questions.json"
 STATE_PATH = RUNTIME_DIR / "state.json"
 CURATED_PATH = RUNTIME_DIR / "curated_600.json"
+SHADOW_DIR = RUNTIME_DIR / "shadow"
+SHADOW_REPORT_PATH = SHADOW_DIR / "shadow_report.json"
 DOCS_DIR = ROOT / "docs"
 WEB_DATA_DIR = DOCS_DIR / "data"
 WEB_DATA_PATH = WEB_DATA_DIR / "csa600.json"
@@ -877,6 +887,7 @@ def mostly_japanese(text: str, *, threshold: float = 0.18) -> bool:
 
 def ensure_runtime_dir() -> None:
     RUNTIME_DIR.mkdir(exist_ok=True)
+    SHADOW_DIR.mkdir(exist_ok=True)
 
 
 def extract_text(source: Path) -> str:
@@ -1913,6 +1924,96 @@ def question_similarity_meta(
     }
 
 
+def embedding_source_text(question: Dict[str, object], enrichment: Dict[str, object]) -> str:
+    correct_text = " ".join(
+        normalize_text(choice.get("text_ja") or choice.get("text") or "")
+        for choice in question.get("choices", [])
+        if choice.get("id") in question.get("correct_choice_ids", [])
+    )
+    choice_text = " ".join(
+        normalize_text(choice.get("text_ja") or choice.get("text") or "")
+        for choice in question.get("choices", [])
+    )
+    doc_basis = enrichment.get("doc_basis", {})
+    basis_terms = doc_basis.get("basis_terms", []) if isinstance(doc_basis, dict) else []
+    parts = [
+        normalize_text(question.get("prompt_ja") or question.get("prompt") or ""),
+        normalize_text(question.get("overall_explanation_ja") or question.get("overall_explanation") or ""),
+        correct_text,
+        choice_text,
+        " ".join(enrichment.get("topic_tags", [])),
+        " ".join(enrichment.get("adaptive_tags", [])),
+        " ".join(enrichment.get("release_tags", [])),
+        " ".join(basis_terms),
+        normalize_text(enrichment.get("confusion_family_label") or ""),
+    ]
+    return " ".join(part for part in parts if part).strip()
+
+
+def normalize_embedding_rows(matrix: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+
+
+def build_bucket_embeddings(
+    bucket: Sequence[Dict[str, object]],
+    enrichments: Dict[str, Dict[str, object]],
+) -> Tuple[Dict[str, np.ndarray], Dict[str, object]]:
+    if not bucket:
+        return {}, {"method": "empty", "dimensions": 0, "variance_explained": 0.0}
+
+    texts = [embedding_source_text(question, enrichments[question["id"]]) for question in bucket]
+    if len(texts) == 1:
+        return {bucket[0]["id"]: np.array([1.0], dtype=float)}, {
+            "method": "singleton",
+            "dimensions": 1,
+            "variance_explained": 1.0,
+        }
+
+    word_vectorizer = TfidfVectorizer(
+        analyzer="word",
+        ngram_range=(1, 2),
+        min_df=1,
+        max_features=6000,
+        sublinear_tf=True,
+    )
+    char_vectorizer = TfidfVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 5),
+        min_df=1,
+        max_features=12000,
+        sublinear_tf=True,
+    )
+    word_matrix = word_vectorizer.fit_transform(texts)
+    char_matrix = char_vectorizer.fit_transform(texts)
+    feature_matrix = hstack([word_matrix, char_matrix], format="csr")
+
+    max_components = min(96, feature_matrix.shape[0] - 1, feature_matrix.shape[1] - 1)
+    if max_components >= 8:
+        svd = TruncatedSVD(n_components=max_components, random_state=42)
+        dense = svd.fit_transform(feature_matrix)
+        explained = float(np.sum(svd.explained_variance_ratio_))
+    else:
+        dense = feature_matrix.toarray()
+        explained = 1.0
+
+    dense = normalize_embedding_rows(np.asarray(dense, dtype=float))
+    vectors = {question["id"]: dense[index] for index, question in enumerate(bucket)}
+    meta = {
+        "method": "tfidf_word_char_svd_embedding",
+        "dimensions": int(dense.shape[1]),
+        "variance_explained": round(explained, 4),
+    }
+    return vectors, meta
+
+
+def cosine_similarity(left: Optional[np.ndarray], right: Optional[np.ndarray]) -> float:
+    if left is None or right is None or left.size == 0 or right.size == 0:
+        return 0.0
+    return float(np.dot(left, right))
+
+
 def build_doc_basis(
     question: Dict[str, object],
     concept_tags: List[str],
@@ -2044,13 +2145,17 @@ def semantic_similarity_score(left: Dict[str, object], right: Dict[str, object])
     tag_score = jaccard_score(left_similarity["cluster_tags"], right_similarity["cluster_tags"])
     seed_score = jaccard_score(left_similarity["seed_terms"], right_similarity["seed_terms"])
     confusion_bonus = 0.08 if left.get("confusion_family") and left.get("confusion_family") == right.get("confusion_family") else 0.0
+    embedding_score = 0.0
+    if left.get("embedding_vector") is not None and right.get("embedding_vector") is not None:
+        embedding_score = cosine_similarity(left["embedding_vector"], right["embedding_vector"])
     return min(
         1.0,
-        prompt_score * 0.52
-        + answer_score * 0.18
-        + choice_score * 0.12
+        prompt_score * 0.26
+        + answer_score * 0.12
+        + choice_score * 0.08
         + tag_score * 0.10
-        + seed_score * 0.08
+        + seed_score * 0.06
+        + embedding_score * 0.38
         + confusion_bonus,
     )
 
@@ -2065,12 +2170,19 @@ def is_near_duplicate(left: Dict[str, object], right: Dict[str, object]) -> bool
     choice_score = jaccard_score(left_similarity["choice_ngrams"], right_similarity["choice_ngrams"])
     tag_score = jaccard_score(left_similarity["cluster_tags"], right_similarity["cluster_tags"])
     seed_score = jaccard_score(left_similarity["seed_terms"], right_similarity["seed_terms"])
+    embedding_score = 0.0
+    if left.get("embedding_vector") is not None and right.get("embedding_vector") is not None:
+        embedding_score = cosine_similarity(left["embedding_vector"], right["embedding_vector"])
     total_score = semantic_similarity_score(left, right)
+    if embedding_score >= 0.965 and tag_score >= 0.12:
+        return True
+    if embedding_score >= 0.94 and (answer_score >= 0.22 or choice_score >= 0.30 or seed_score >= 0.24):
+        return True
     if prompt_score >= 0.86 and (answer_score >= 0.20 or choice_score >= 0.32):
         return True
     if prompt_score >= 0.74 and answer_score >= 0.34 and (tag_score >= 0.20 or seed_score >= 0.20):
         return True
-    return total_score >= 0.78 and (answer_score >= 0.24 or choice_score >= 0.38 or tag_score >= 0.30)
+    return total_score >= 0.8 and (embedding_score >= 0.88 or answer_score >= 0.24 or choice_score >= 0.38 or tag_score >= 0.30)
 
 
 def build_semantic_cluster_metadata(
@@ -2099,8 +2211,13 @@ def build_semantic_cluster_metadata(
         bucket_key = (question["top_domain"], int(question.get("choose_count", 1)))
         by_bucket.setdefault(bucket_key, []).append(question)
 
+    embedding_meta: Dict[str, object] = {}
     for bucket in by_bucket.values():
         ordered = sorted(bucket, key=lambda item: item["global_index"])
+        vectors, meta = build_bucket_embeddings(ordered, enrichments)
+        embedding_meta = meta
+        for question in ordered:
+            enrichments[question["id"]]["embedding_vector"] = vectors[question["id"]]
         for index, left_question in enumerate(ordered):
             left = enrichments[left_question["id"]]
             for right_question in ordered[index + 1 :]:
@@ -2137,17 +2254,27 @@ def build_semantic_cluster_metadata(
         anchor_enrichment = enrichments[anchor_id]
         for rank, question in enumerate(ordered, start=1):
             similarity_to_anchor = 1.0 if question["id"] == anchor_id else semantic_similarity_score(enrichments[question["id"]], anchor_enrichment)
+            embedding_similarity_to_anchor = 1.0
+            if question["id"] != anchor_id:
+                embedding_similarity_to_anchor = cosine_similarity(
+                    enrichments[question["id"]].get("embedding_vector"),
+                    anchor_enrichment.get("embedding_vector"),
+                )
             metadata[question["id"]] = {
                 "semantic_cluster_id": cluster_id,
                 "semantic_cluster_size": cluster_size,
                 "semantic_cluster_rank": rank,
                 "semantic_cluster_anchor_id": anchor_id,
                 "semantic_similarity_to_anchor": round(similarity_to_anchor, 3),
+                "embedding_similarity_to_anchor": round(float(embedding_similarity_to_anchor), 3),
             }
     summary = {
         "cluster_count": cluster_count,
         "question_count": cluster_question_count,
         "largest_cluster": largest_cluster,
+        "embedding_method": embedding_meta.get("method", "unknown"),
+        "embedding_dimensions": embedding_meta.get("dimensions", 0),
+        "embedding_variance_explained": embedding_meta.get("variance_explained", 0.0),
     }
     return metadata, summary
 
@@ -2212,6 +2339,27 @@ def base_difficulty_seed(question: Dict[str, object], adaptive_tags: List[str]) 
     if "platform_overview" in adaptive_tags or "service_catalog" in adaptive_tags:
         difficulty -= 0.02
     return round(max(0.28, min(0.88, difficulty)), 3)
+
+
+def irt_seed_params(
+    question: Dict[str, object],
+    adaptive_tags: List[str],
+    enrichment: Dict[str, object],
+) -> Dict[str, float]:
+    difficulty = base_difficulty_seed(question, adaptive_tags)
+    discrimination = 1.0
+    discrimination += 0.18 if question.get("multi_select") else 0.0
+    discrimination += min(0.22, len(adaptive_tags) * 0.03)
+    if enrichment.get("confusion_family"):
+        discrimination += 0.14
+    if question.get("source_status_correct") is False:
+        discrimination += 0.08
+    guess = 0.14 if int(question.get("choose_count", 1)) == 1 else 0.08
+    return {
+        "difficulty": round(max(0.2, min(0.95, difficulty)), 3),
+        "discrimination": round(max(0.8, min(2.2, discrimination)), 3),
+        "guess": round(max(0.02, min(0.2, guess)), 3),
+    }
 
 
 def narrow_scope_hits(question: Dict[str, object]) -> List[str]:
@@ -2414,6 +2562,7 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
         adaptive_tags = list(enrichment["adaptive_tags"])
         release_tags = list(enrichment["release_tags"])
         current_relevance_score = round(min(1.0, 0.22 + len(release_tags) * 0.22), 2)
+        irt_seed = irt_seed_params(question, adaptive_tags, enrichment)
         scored.append(
             {
                 "question": question,
@@ -2428,6 +2577,9 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "root_snippet": enrichment["root_snippet"],
                 "current_relevance_score": current_relevance_score,
                 "base_difficulty": base_difficulty_seed(question, adaptive_tags),
+                "irt_difficulty": irt_seed["difficulty"],
+                "irt_discrimination": irt_seed["discrimination"],
+                "irt_guess": irt_seed["guess"],
                 "cluster_key": cluster_key(question, topic_tags, enrichment.get("confusion_family")),
                 "duplicate_group_id": enrichment["duplicate_group_id"],
                 "duplicate_group_size": enrichment["duplicate_group_size"],
@@ -2438,6 +2590,7 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "semantic_cluster_rank": enrichment["semantic_cluster_rank"],
                 "semantic_cluster_anchor_id": enrichment["semantic_cluster_anchor_id"],
                 "semantic_similarity_to_anchor": enrichment["semantic_similarity_to_anchor"],
+                "embedding_similarity_to_anchor": enrichment.get("embedding_similarity_to_anchor", enrichment["semantic_similarity_to_anchor"]),
             }
         )
 
@@ -2532,6 +2685,7 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "semantic_cluster_id": item["semantic_cluster_id"],
                 "semantic_cluster_size": item["semantic_cluster_size"],
                 "semantic_similarity_to_anchor": item["semantic_similarity_to_anchor"],
+                "embedding_similarity_to_anchor": item["embedding_similarity_to_anchor"],
                 "confusion_family": item["confusion_family"],
                 "confusion_family_label": item["confusion_family_label"],
                 "prompt": question["prompt_ja"],
@@ -2564,6 +2718,9 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "current_relevance_score": item["current_relevance_score"],
                 "delta_relevance_score": round(min(0.15, 0.05 + len(item["release_tags"]) * 0.05), 3),
                 "base_difficulty": item["base_difficulty"],
+                "irt_difficulty": item["irt_difficulty"],
+                "irt_discrimination": item["irt_discrimination"],
+                "irt_guess": item["irt_guess"],
                 "exam_weight": TOP_DOMAINS[question["top_domain"]]["weight"],
                 "active_pool_score": item["active_pool_score"],
                 "active_pool_rank": active_rank_lookup[question["id"]],
@@ -2586,6 +2743,8 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                     "current_service_tags": item["release_tags"],
                     "confusion_family": item["confusion_family"],
                     "base_difficulty": item["base_difficulty"],
+                    "irt_difficulty": item["irt_difficulty"],
+                    "irt_discrimination": item["irt_discrimination"],
                     "active_pool_score": item["active_pool_score"],
                     "active_pool_rank": active_rank_lookup[question["id"]],
                 },
@@ -2635,7 +2794,7 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
         "selection_policy": [
             "2026年1月更新の公式CSAブループリント配分で600問に圧縮",
             "高品質バンク・学習領域メタデータ・解説の厚さを優先",
-            "署名ベース完全重複は1代表に抑え、軽量ローカル類似度で近似重複も分散",
+            "署名ベース完全重複は1代表に抑え、TF-IDF + SVD 埋め込みで意味近似クラスタを作る",
             "混同しやすい概念セットと2026年4月時点の現行ServiceNow文脈に追加加点",
             "600問は上限プールとし、実運用のアクティブ学習セットは420〜560問、初期推奨は480問",
             "2週間・1日2-3時間で回せるよう、複数選択と弱点化しやすい論点を少し厚めに採用",
@@ -2663,6 +2822,8 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "current_service_tags",
                 "confusion_family",
                 "base_difficulty",
+                "irt_difficulty",
+                "irt_discrimination",
                 "active_pool_score",
                 "active_pool_rank",
             ],
@@ -2676,6 +2837,9 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "hint_count",
                 "predicted_recall_before",
                 "predicted_recall_after",
+                "knowledge_prob_before",
+                "knowledge_prob_after",
+                "bandit_reward",
                 "working_set_size",
             ],
         },
@@ -2713,6 +2877,355 @@ def load_curated_payload() -> Dict[str, object]:
 def export_web_data(curated: Dict[str, object]) -> None:
     WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
     WEB_DATA_PATH.write_text(json.dumps(curated, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
+def shadow_question_id(event: Dict[str, object]) -> Optional[str]:
+    return event.get("questionId") or event.get("question_id")
+
+
+def load_shadow_events(paths: Sequence[Path]) -> List[Dict[str, object]]:
+    events: List[Dict[str, object]] = []
+    for path in paths:
+        if not path.exists():
+            raise SystemExit(f"Shadow log not found: {path}")
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            events.append(entry)
+    events.sort(key=lambda item: item.get("submittedAt") or item.get("at") or "")
+    return events
+
+
+def build_shadow_attempts(events: Sequence[Dict[str, object]], curated: Dict[str, object]) -> List[Dict[str, object]]:
+    question_lookup = {question["id"]: question for question in curated["questions"]}
+    attempts: List[Dict[str, object]] = []
+    for event in events:
+        if event.get("type") != "drill_answer_recorded":
+            continue
+        question_id = shadow_question_id(event)
+        if not question_id or question_id not in question_lookup:
+            continue
+        question = question_lookup[question_id]
+        timestamp = event.get("submittedAt") or event.get("at")
+        if not timestamp:
+            continue
+        attempts.append(
+            {
+                "question_id": question_id,
+                "question_index": question["curated_index"] - 1,
+                "correct": 1 if event.get("correct") else 0,
+                "confidence_key": event.get("confidenceKey") or "unsure",
+                "timestamp": timestamp,
+                "domain_key": question["domain_key"],
+                "confusion_family": question.get("confusion_family"),
+            }
+        )
+    attempts.sort(key=lambda item: item["timestamp"])
+    return attempts
+
+
+def segment_shadow_sequences(attempts: Sequence[Dict[str, object]], gap_hours: float = 6.0) -> List[List[Dict[str, object]]]:
+    sequences: List[List[Dict[str, object]]] = []
+    current: List[Dict[str, object]] = []
+    previous_at: Optional[datetime] = None
+    for attempt in attempts:
+        current_at = datetime.fromisoformat(str(attempt["timestamp"]).replace("Z", "+00:00"))
+        if previous_at is not None:
+            gap = (current_at - previous_at).total_seconds() / 3600
+            if gap > gap_hours and current:
+                if len(current) >= 3:
+                    sequences.append(current)
+                current = []
+        current.append(attempt)
+        previous_at = current_at
+    if len(current) >= 3:
+        sequences.append(current)
+    return sequences
+
+
+def sliding_windows(sequence: Sequence[Dict[str, object]], window: int) -> List[List[Dict[str, object]]]:
+    if len(sequence) <= window:
+        return [list(sequence)]
+    stride = max(2, window // 2)
+    windows: List[List[Dict[str, object]]] = []
+    for start in range(0, len(sequence) - 1, stride):
+        chunk = list(sequence[start : start + window])
+        if len(chunk) >= 3:
+            windows.append(chunk)
+        if start + window >= len(sequence):
+            break
+    return windows
+
+
+def split_shadow_sequences(sequences: Sequence[List[Dict[str, object]]]) -> Tuple[List[List[Dict[str, object]]], List[List[Dict[str, object]]]]:
+    if len(sequences) <= 1:
+        return list(sequences), list(sequences)
+    cut = max(1, math.floor(len(sequences) * 0.8))
+    train = list(sequences[:cut])
+    valid = list(sequences[cut:]) or list(sequences[-1:])
+    return train, valid
+
+
+def sequence_examples(sequences: Sequence[List[Dict[str, object]]], window: int) -> List[Dict[str, object]]:
+    examples: List[Dict[str, object]] = []
+    for sequence in sequences:
+        for chunk in sliding_windows(sequence, window):
+            question_ids = [attempt["question_index"] for attempt in chunk]
+            responses = [attempt["correct"] for attempt in chunk]
+            examples.append(
+                {
+                    "input_question_ids": question_ids[:-1],
+                    "input_responses": responses[:-1],
+                    "target_question_ids": question_ids[1:],
+                    "target_responses": responses[1:],
+                }
+            )
+    return examples
+
+
+def batch_examples(examples: Sequence[Dict[str, object]], batch_size: int) -> List[List[Dict[str, object]]]:
+    return [list(examples[index : index + batch_size]) for index in range(0, len(examples), batch_size)]
+
+
+def tensorize_batch(batch: Sequence[Dict[str, object]], num_questions: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    max_len = max(len(example["input_question_ids"]) for example in batch)
+    interaction = torch.zeros((len(batch), max_len), dtype=torch.long)
+    input_q = torch.zeros((len(batch), max_len), dtype=torch.long)
+    target_q = torch.zeros((len(batch), max_len), dtype=torch.long)
+    target_y = torch.zeros((len(batch), max_len), dtype=torch.float32)
+    mask = torch.zeros((len(batch), max_len), dtype=torch.float32)
+    for row, example in enumerate(batch):
+        length = len(example["input_question_ids"])
+        for col in range(length):
+            qid = int(example["input_question_ids"][col])
+            resp = int(example["input_responses"][col])
+            interaction[row, col] = qid + 1 + resp * num_questions
+            input_q[row, col] = qid + 1
+            target_q[row, col] = int(example["target_question_ids"][col]) + 1
+            target_y[row, col] = float(example["target_responses"][col])
+            mask[row, col] = 1.0
+    return interaction, input_q, target_q, target_y * mask, mask
+
+
+class ShadowDKTModel(torch.nn.Module):
+    def __init__(self, num_questions: int, hidden_size: int) -> None:
+        super().__init__()
+        self.embedding = torch.nn.Embedding(num_questions * 2 + 1, hidden_size)
+        self.gru = torch.nn.GRU(hidden_size, hidden_size, batch_first=True)
+        self.output = torch.nn.Linear(hidden_size, num_questions + 1)
+
+    def forward(self, interaction: torch.Tensor) -> torch.Tensor:
+        encoded = self.embedding(interaction)
+        hidden, _ = self.gru(encoded)
+        return self.output(hidden)
+
+
+class ShadowSAKTModel(torch.nn.Module):
+    def __init__(self, num_questions: int, hidden_size: int, heads: int = 4) -> None:
+        super().__init__()
+        self.interaction_embedding = torch.nn.Embedding(num_questions * 2 + 1, hidden_size)
+        self.question_embedding = torch.nn.Embedding(num_questions + 1, hidden_size)
+        self.attention = torch.nn.MultiheadAttention(hidden_size, heads, dropout=0.1, batch_first=True)
+        self.norm = torch.nn.LayerNorm(hidden_size)
+        self.ff = torch.nn.Sequential(
+            torch.nn.Linear(hidden_size, hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.1),
+            torch.nn.Linear(hidden_size, hidden_size),
+        )
+        self.output = torch.nn.Linear(hidden_size, 1)
+
+    def forward(self, interaction: torch.Tensor, target_q: torch.Tensor) -> torch.Tensor:
+        memory = self.interaction_embedding(interaction)
+        query = self.question_embedding(target_q)
+        seq_len = interaction.size(1)
+        causal_mask = torch.triu(torch.ones((seq_len, seq_len), device=interaction.device, dtype=torch.bool), diagonal=1)
+        attended, _ = self.attention(query, memory, memory, attn_mask=causal_mask)
+        hidden = self.norm(attended + self.ff(attended))
+        return self.output(hidden).squeeze(-1)
+
+
+def metric_summary(targets: Sequence[float], probs: Sequence[float]) -> Dict[str, object]:
+    if not targets:
+        return {"accuracy": 0.0, "brier": 0.0, "log_loss": 0.0, "auc": None}
+    y_true = np.asarray(targets, dtype=float)
+    y_prob = np.clip(np.asarray(probs, dtype=float), 1e-5, 1 - 1e-5)
+    y_pred = (y_prob >= 0.5).astype(int)
+    auc: Optional[float]
+    if len(set(y_true.tolist())) < 2:
+        auc = None
+    else:
+        auc = float(roc_auc_score(y_true, y_prob))
+    return {
+        "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
+        "brier": round(float(brier_score_loss(y_true, y_prob)), 4),
+        "log_loss": round(float(log_loss(y_true, y_prob, labels=[0.0, 1.0])), 4),
+        "auc": round(auc, 4) if auc is not None else None,
+    }
+
+
+def baseline_shadow_predictions(
+    train_sequences: Sequence[List[Dict[str, object]]],
+    valid_sequences: Sequence[List[Dict[str, object]]],
+) -> Dict[str, object]:
+    question_stats: Dict[int, List[int]] = {}
+    domain_stats: Dict[str, List[int]] = {}
+    global_results: List[int] = []
+    for sequence in train_sequences:
+        for attempt in sequence:
+            question_stats.setdefault(attempt["question_index"], []).append(attempt["correct"])
+            domain_stats.setdefault(attempt["domain_key"], []).append(attempt["correct"])
+            global_results.append(attempt["correct"])
+
+    global_mean = (sum(global_results) + 1.0) / (len(global_results) + 2.0) if global_results else 0.58
+    targets: List[float] = []
+    probs: List[float] = []
+    for sequence in valid_sequences:
+        for attempt in sequence[1:]:
+            q_values = question_stats.get(attempt["question_index"], [])
+            d_values = domain_stats.get(attempt["domain_key"], [])
+            q_mean = (sum(q_values) + 1.0) / (len(q_values) + 2.0) if q_values else global_mean
+            d_mean = (sum(d_values) + 1.0) / (len(d_values) + 2.0) if d_values else global_mean
+            prob = q_mean * 0.44 + d_mean * 0.32 + global_mean * 0.24
+            targets.append(float(attempt["correct"]))
+            probs.append(prob)
+    return {
+        "model": "baseline",
+        "metrics": metric_summary(targets, probs),
+    }
+
+
+def train_shadow_model(
+    model_kind: str,
+    train_examples: Sequence[Dict[str, object]],
+    valid_examples: Sequence[Dict[str, object]],
+    num_questions: int,
+    epochs: int,
+    hidden_size: int,
+    batch_size: int,
+) -> Dict[str, object]:
+    torch.manual_seed(42)
+    if model_kind == "dkt":
+        model: torch.nn.Module = ShadowDKTModel(num_questions, hidden_size)
+    elif model_kind == "sakt":
+        model = ShadowSAKTModel(num_questions, hidden_size)
+    else:
+        raise SystemExit(f"Unsupported shadow model: {model_kind}")
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.004)
+    criterion = torch.nn.BCEWithLogitsLoss(reduction="none")
+
+    def run_epoch(examples: Sequence[Dict[str, object]], train_mode: bool) -> Tuple[float, List[float], List[float]]:
+        total_loss = 0.0
+        total_weight = 0.0
+        all_targets: List[float] = []
+        all_probs: List[float] = []
+        model.train(train_mode)
+        for batch in batch_examples(examples, batch_size):
+            interaction, _input_q, target_q, target_y, mask = tensorize_batch(batch, num_questions)
+            if model_kind == "dkt":
+                logits_all = model(interaction)
+                gathered = torch.gather(logits_all, 2, target_q.unsqueeze(-1)).squeeze(-1)
+            else:
+                gathered = model(interaction, target_q)
+            loss = criterion(gathered, target_y) * mask
+            denom = torch.clamp(mask.sum(), min=1.0)
+            batch_loss = loss.sum() / denom
+            if train_mode:
+                optimizer.zero_grad()
+                batch_loss.backward()
+                optimizer.step()
+            total_loss += float(loss.sum().item())
+            total_weight += float(mask.sum().item())
+            probs = torch.sigmoid(gathered).detach().cpu().numpy()
+            targets = target_y.detach().cpu().numpy()
+            mask_np = mask.detach().cpu().numpy()
+            for index in range(mask_np.shape[0]):
+                for col in range(mask_np.shape[1]):
+                    if mask_np[index, col] > 0:
+                        all_targets.append(float(targets[index, col]))
+                        all_probs.append(float(probs[index, col]))
+        return (total_loss / total_weight if total_weight else 0.0), all_targets, all_probs
+
+    best_snapshot: Optional[Dict[str, object]] = None
+    history: List[Dict[str, float]] = []
+    for epoch in range(epochs):
+        train_loss, _, _ = run_epoch(train_examples, train_mode=True)
+        valid_loss, valid_targets, valid_probs = run_epoch(valid_examples, train_mode=False)
+        metrics = metric_summary(valid_targets, valid_probs)
+        history.append({"epoch": epoch + 1, "train_loss": round(train_loss, 4), "valid_loss": round(valid_loss, 4)})
+        score = metrics["auc"] if metrics["auc"] is not None else -metrics["log_loss"]
+        if best_snapshot is None or score > best_snapshot["selection_score"]:
+            best_snapshot = {
+                "selection_score": score,
+                "metrics": metrics,
+                "history": list(history),
+            }
+
+    if best_snapshot is None:
+        best_snapshot = {
+            "selection_score": 0.0,
+            "metrics": {"accuracy": 0.0, "brier": 0.0, "log_loss": 0.0, "auc": None},
+            "history": history,
+        }
+    return {
+        "model": model_kind,
+        "metrics": best_snapshot["metrics"],
+        "history": best_snapshot["history"][-5:],
+    }
+
+
+def run_shadow_training(
+    curated: Dict[str, object],
+    log_paths: Sequence[Path],
+    epochs: int,
+    hidden_size: int,
+    window: int,
+    batch_size: int,
+) -> Dict[str, object]:
+    events = load_shadow_events(log_paths)
+    attempts = build_shadow_attempts(events, curated)
+    sequences = segment_shadow_sequences(attempts)
+    train_sequences, valid_sequences = split_shadow_sequences(sequences)
+    train_examples = sequence_examples(train_sequences, window)
+    valid_examples = sequence_examples(valid_sequences, window)
+    if not train_examples or not valid_examples:
+        raise SystemExit("Shadow Deep KT を学習するには、最低でも連続した回答ログが3件以上必要です。")
+
+    baseline = baseline_shadow_predictions(train_sequences, valid_sequences)
+    num_questions = len(curated["questions"])
+    dkt = train_shadow_model("dkt", train_examples, valid_examples, num_questions, epochs, hidden_size, batch_size)
+    sakt = train_shadow_model("sakt", train_examples, valid_examples, num_questions, epochs, hidden_size, batch_size)
+
+    candidates = [baseline, dkt, sakt]
+    champion = max(
+        candidates,
+        key=lambda item: (
+            item["metrics"]["auc"] if item["metrics"]["auc"] is not None else -item["metrics"]["log_loss"]
+        ),
+    )
+    report = {
+        "built_at": iso_now(),
+        "logs": [str(path) for path in log_paths],
+        "data_summary": {
+            "events": len(events),
+            "attempts": len(attempts),
+            "sequences": len(sequences),
+            "train_examples": len(train_examples),
+            "valid_examples": len(valid_examples),
+        },
+        "models": [baseline, dkt, sakt],
+        "champion": champion["model"],
+    }
+    SHADOW_REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
 
 
 def start_mock_session(payload: Dict[str, object], state: Dict[str, object], count: int, minutes: int) -> Dict[str, object]:
@@ -2775,6 +3288,32 @@ def cmd_web_build(args: argparse.Namespace) -> None:
     export_web_data(curated)
     print(f"Exported: {WEB_DATA_PATH}")
     print(f"Questions: {curated['meta']['curated_count']}")
+
+
+def cmd_shadow_train(args: argparse.Namespace) -> None:
+    curated = load_curated_payload()
+    log_paths = [Path(path).expanduser() for path in args.logs]
+    report = run_shadow_training(
+        curated,
+        log_paths,
+        epochs=args.epochs,
+        hidden_size=args.hidden_size,
+        window=args.window,
+        batch_size=args.batch_size,
+    )
+    print(f"Shadow report: {SHADOW_REPORT_PATH}")
+    print("Data summary:")
+    for key, value in report["data_summary"].items():
+        print(f"  - {key}: {value}")
+    print("Model metrics:")
+    for item in report["models"]:
+        auc = item["metrics"]["auc"]
+        auc_text = f"{auc:.4f}" if auc is not None else "n/a"
+        print(
+            f"  - {item['model']}: acc {item['metrics']['accuracy']:.4f}, "
+            f"logloss {item['metrics']['log_loss']:.4f}, brier {item['metrics']['brier']:.4f}, auc {auc_text}"
+        )
+    print(f"Champion: {report['champion']}")
 
 
 def cmd_next(args: argparse.Namespace) -> None:
@@ -2903,6 +3442,14 @@ def build_parser() -> argparse.ArgumentParser:
     web_build.add_argument("--days", type=int, default=DEFAULT_STUDY_DAYS)
     web_build.add_argument("--daily-hours", type=float, default=DEFAULT_DAILY_HOURS)
     web_build.set_defaults(func=cmd_web_build)
+
+    shadow_train = sub.add_parser("shadow-train", help="Shadow Deep KT (baseline / DKT / SAKT) を学習比較")
+    shadow_train.add_argument("logs", nargs="+", help="exported JSONL shadow logs")
+    shadow_train.add_argument("--epochs", type=int, default=12)
+    shadow_train.add_argument("--hidden-size", type=int, default=64)
+    shadow_train.add_argument("--window", type=int, default=24)
+    shadow_train.add_argument("--batch-size", type=int, default=12)
+    shadow_train.set_defaults(func=cmd_shadow_train)
 
     nxt = sub.add_parser("next", help="次の優先問題を表示")
     nxt.add_argument("--domain", default=None)

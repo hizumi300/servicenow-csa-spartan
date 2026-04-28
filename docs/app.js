@@ -42,7 +42,6 @@ const state = {
   user: null,
   currentQuestionId: null,
   currentSelections: [],
-  currentQuestionShownAt: null,
   currentQuestionModel: null,
   hintLevel: 0,
   mockTimerHandle: null,
@@ -256,7 +255,6 @@ function defaultAttemptRecord() {
     lastPredictedRecall: null,
     lastKnowledgeProb: null,
     lastHintsUsed: 0,
-    lastResponseMs: null,
     history: [],
   };
 }
@@ -666,7 +664,6 @@ function loadNextDrillQuestion() {
   if (!next) return;
   state.currentQuestionId = next.question.id;
   state.currentSelections = [];
-  state.currentQuestionShownAt = Date.now();
   state.currentQuestionModel = next.rec.model;
   state.hintLevel = 0;
   renderCurrentQuestion();
@@ -774,7 +771,6 @@ function applyAdaptiveUpdate(question, correct, userIds) {
   const learner = state.user.learner;
   const record = attemptRecord(question.id);
   const before = state.currentQuestionModel || questionModel(question);
-  const responseMs = state.currentQuestionShownAt ? Date.now() - state.currentQuestionShownAt : null;
   const hintsUsed = state.hintLevel;
 
   const observed = correct
@@ -791,14 +787,13 @@ function applyAdaptiveUpdate(question, correct, userIds) {
   learner.questionBias[question.id] = (learner.questionBias[question.id] || 0) + (-error) * lr * 0.42;
 
   const prevHalfLife = record.halfLifeHours || initialHalfLife(question);
-  const speedFactor = responseMs ? clamp(1.16 - responseMs / 90000, 0.82, 1.16) : 1;
   const hintFactor = clamp(1 - hintsUsed * 0.08, 0.72, 1);
   const desirableDifficulty = clamp(1 + (0.68 - before.predictedRecall) * 0.45, 0.82, 1.28);
 
   let nextHalfLife = prevHalfLife;
   if (correct) {
     const growth = 1.34 + before.knowledgeProb * 0.72 + question.current_relevance_score * 0.18;
-    nextHalfLife = Math.max(prevHalfLife + 2.5, prevHalfLife * growth * speedFactor * hintFactor * desirableDifficulty);
+    nextHalfLife = Math.max(prevHalfLife + 2.5, prevHalfLife * growth * hintFactor * desirableDifficulty);
   } else {
     const shrink = 0.42 + before.knowledgeProb * 0.16;
     nextHalfLife = Math.max(2, prevHalfLife * shrink);
@@ -820,7 +815,6 @@ function applyAdaptiveUpdate(question, correct, userIds) {
   record.lastPredictedRecall = before.predictedRecall;
   record.lastKnowledgeProb = before.knowledgeProb;
   record.lastHintsUsed = hintsUsed;
-  record.lastResponseMs = responseMs;
   record.halfLifeHours = clamp(nextHalfLife, 2, 720);
   record.dueAt = new Date(Date.now() + nextDueHours * 3600000).toISOString();
   record.history = [
@@ -832,7 +826,6 @@ function applyAdaptiveUpdate(question, correct, userIds) {
       predictedRecall: before.predictedRecall,
       knowledgeProb: before.knowledgeProb,
       hintsUsed,
-      responseMs,
       halfLifeHours: record.halfLifeHours,
     },
   ].slice(-30);
@@ -844,7 +837,6 @@ function applyAdaptiveUpdate(question, correct, userIds) {
     before,
     after: questionModel(question),
     record,
-    responseMs,
     hintsUsed,
   };
 }
@@ -877,7 +869,7 @@ function submitCurrentQuestion() {
     <div>${coach}</div>
     <div>モデル更新: 再現率予測 ${Math.round(update.before.predictedRecall * 100)}% → ${Math.round(update.after.predictedRecall * 100)}%</div>
     <div>記憶半減期: ${update.before.halfLifeHours.toFixed(1)}h → ${update.record.halfLifeHours.toFixed(1)}h | 次回推奨 ${nextReview.toFixed(1)}h後</div>
-    <div>応答時間: ${update.responseMs ? Math.round(update.responseMs / 1000) : "-"}秒 | ヒント使用: ${update.hintsUsed}</div>
+    <div>ヒント使用: ${update.hintsUsed}</div>
     <div>${question.explanation}</div>
     <div>${question.docs.map((url) => `<a href="${url}" target="_blank" rel="noreferrer">公式ドキュメント</a>`).join(" / ")}</div>
   `;

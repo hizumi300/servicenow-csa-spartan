@@ -18,7 +18,7 @@
           <h1>2週間で叩き込む、600問の高頻出バンク</h1>
           <p class="hero-text">
             1434問から、試験配分と学習効率を優先して600問に圧縮。
-            1日2-3時間でも回るように、再出題と模試を先に設計してあります。
+            1日2-3時間でも回るように、忘却曲線と理解度モデルで「今やる価値が最大」の問題を叩き込みます。
           </p>
           <div class="hero-actions">
             <button id="start-sprint" class="primary-button">14日スプリント開始</button>
@@ -90,6 +90,21 @@
               <ul id="selection-policy" class="plain-list"></ul>
             </article>
           </div>
+
+          <div class="grid-two">
+            <article class="panel">
+              <div class="panel-head">
+                <h2>学習モデル</h2>
+              </div>
+              <div id="model-summary" class="stack"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h2>概念弱点</h2>
+              </div>
+              <div id="weak-concepts" class="stack"></div>
+            </article>
+          </div>
         </section>
 
         <section id="view-drill" class="view">
@@ -116,6 +131,7 @@
 
           <article class="panel question-panel">
             <div id="question-meta" class="question-meta"></div>
+            <div id="question-rationale" class="hint-box hidden"></div>
             <div id="question-card" class="question-card empty">
               <p>出題ボタンを押せ。逃げるな。</p>
             </div>

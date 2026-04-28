@@ -383,6 +383,25 @@ select {
   padding: 16px 18px;
 }
 
+.concept-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.concept-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(71, 54, 37, 0.10);
+}
+
+.concept-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
 .result-box.good {
   border-color: rgba(28, 123, 77, 0.24);
 }

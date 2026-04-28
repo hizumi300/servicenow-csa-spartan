@@ -532,6 +532,80 @@ NARROW_SCOPE_PATTERNS = [
     "cleanup orphan cis",
 ]
 
+OFFICIAL_EXAM_CONTEXT = {
+    "as_of_date": "2026-04-28",
+    "exam_blueprint_updated": "2026-01",
+    "current_release_family": "Australia",
+    "current_release_updated": "2026-04-03",
+    "sources": [
+        "https://nowlearning.servicenow.com/kb?id=kb_article_view&sysparm_article=KB0011554",
+        "https://www.servicenow.com/docs/r/release-notes/available-versions.html",
+        "https://www.servicenow.com/docs/r/release-notes/core-platform-rn.html",
+    ],
+    "exam_priority_topics": [
+        "next_experience_unified_navigation",
+        "platform_analytics",
+        "workflow_studio",
+        "virtual_agent",
+        "security_center",
+        "shared_responsibility_model",
+    ],
+}
+
+ADAPTIVE_CONCEPT_TAGS = {
+    "platform_overview_navigation": {
+        "platform_overview": ["platform overview", "platform capabilities", "servicenow platform overview", "プラットフォームの概要"],
+        "the_instance": ["the servicenow instance", "instance", "インスタンス"],
+        "next_experience_unified_navigation": ["next experience", "unified navigation", "application navigator", "favorite", "favorites", "history", "breadcrumb", "お気に入り", "履歴", "ナビゲーション"],
+        "search_and_lists": ["search", "global search", "list", "lists", "filter", "filters", "tag", "tags", "検索", "リスト", "フィルター", "タグ"],
+        "user_menu_and_roles": ["user menu", "impersonate", "elevate roles", "ユーザーメニュー", "権限昇格"],
+    },
+    "instance_configuration": {
+        "installing_applications_and_plugins": ["installing applications", "plugin", "plugins", "application", "applications", "プラグイン", "アプリケーション"],
+        "personalizing_customizing_instance": ["personalize", "personalizing", "customizing", "customize", "branding", "テーマ", "personalizing/customizing"],
+        "common_user_interfaces": ["form builder", "form designer", "common user interfaces", "workspace", "choice list", "フォームビルダー", "フォームデザイナー", "共通ユーザーインターフェース"],
+        "instance_properties": ["system property", "system properties", "property", "properties", "システムプロパティ"],
+    },
+    "configuring_applications_for_collaboration": {
+        "lists_filters_tags": ["lists", "list", "filter", "filters", "tags", "リスト", "フィルター", "タグ"],
+        "list_and_form_anatomy": ["form anatomy", "list and form", "related list", "フォーム", "リスト"],
+        "form_configuration": ["form configuration", "form templates", "form layout", "advanced form configuration", "フォーム設定", "フォームテンプレート"],
+        "task_management": ["task management", "task", "assignment", "fulfillment", "タスク管理"],
+        "visual_task_boards": ["visual task board", "visual task boards", "vtb", "ビジュアルタスクボード"],
+        "platform_analytics": ["platform analytics", "performance analytics", "dashboard", "report", "reports", "visualizations", "ダッシュボード", "レポート", "可視化"],
+        "notifications": ["notification", "notifications", "email", "メール", "通知"],
+    },
+    "self_service_automation": {
+        "knowledge_management": ["knowledge", "knowledge base", "permalink", "ナレッジ", "ナレッジベース"],
+        "service_catalog": ["service catalog", "catalog item", "record producer", "order guide", "request item", "サービスカタログ", "カタログアイテム", "レコードプロデューサー", "オーダーガイド"],
+        "workflow_studio": ["workflow studio", "workflow", "decision builder", "playbook", "workflow authoring"],
+        "virtual_agent": ["virtual agent", "topic", "nlu", "chat", "仮想エージェント"],
+    },
+    "database_management_platform_security": {
+        "data_schema": ["data schema", "schema", "dictionary", "table", "field", "data model", "スキーマ", "辞書", "テーブル", "フィールド"],
+        "application_access_control": ["access control", "acl", "role", "roles", "user criteria", "アクセス制御", "ロール", "ユーザー基準"],
+        "importing_data": ["importing data", "import", "import set", "transform map", "coalesce", "インポート", "インポートセット", "変換マップ"],
+        "cmdb_and_csdm": ["cmdb", "csdm", "configuration item", "構成アイテム"],
+        "security_center": ["security center"],
+        "shared_responsibility_model": ["shared responsibility model", "責任共有モデル"],
+    },
+    "data_migration_integration": {
+        "ui_policies": ["ui policy", "ui policies", "uiポリシー"],
+        "business_rules": ["business rule", "business rules", "ビジネスルール"],
+        "system_update_sets": ["system update set", "system update sets", "update set", "更新セット"],
+        "scripting_in_servicenow": ["scripting", "javascript", "client script", "server script", "script", "スクリプト", "javascript"],
+    },
+}
+
+CURRENT_RELEASE_PRIORITY_TAGS = {
+    "next_experience_unified_navigation",
+    "platform_analytics",
+    "workflow_studio",
+    "virtual_agent",
+    "security_center",
+    "shared_responsibility_model",
+}
+
 
 def now_local() -> datetime:
     return datetime.now().astimezone()
@@ -1368,6 +1442,35 @@ def extract_topic_tags(question: Dict[str, object]) -> List[str]:
     return tags
 
 
+def extract_adaptive_tags(question: Dict[str, object]) -> List[str]:
+    blob = question_blob_ja(question)
+    tags: List[str] = []
+    for tag, patterns in ADAPTIVE_CONCEPT_TAGS.get(question["top_domain"], {}).items():
+        if any(pattern in blob for pattern in patterns):
+            tags.append(tag)
+    return tags
+
+
+def current_release_tags(adaptive_tags: List[str]) -> List[str]:
+    return [tag for tag in adaptive_tags if tag in CURRENT_RELEASE_PRIORITY_TAGS]
+
+
+def base_difficulty_seed(question: Dict[str, object], adaptive_tags: List[str]) -> float:
+    difficulty = 0.48
+    if question.get("multi_select"):
+        difficulty += 0.08
+    difficulty += min(0.08, len(adaptive_tags) * 0.015)
+    if question.get("source_status_correct") is False:
+        difficulty += 0.04
+    if scenario_question(question):
+        difficulty += 0.03
+    if "application_access_control" in adaptive_tags or "importing_data" in adaptive_tags:
+        difficulty += 0.04
+    if "platform_overview" in adaptive_tags or "service_catalog" in adaptive_tags:
+        difficulty -= 0.02
+    return round(max(0.28, min(0.88, difficulty)), 3)
+
+
 def narrow_scope_hits(question: Dict[str, object]) -> List[str]:
     blob = question_blob_ja(question)
     return [pattern for pattern in NARROW_SCOPE_PATTERNS if pattern in blob]
@@ -1424,6 +1527,12 @@ def curation_score(question: Dict[str, object]) -> Tuple[float, List[str], List[
         reasons.append("コア論点: " + ", ".join(topic_tags[:3]))
     else:
         score -= 4.0
+
+    adaptive_tags = extract_adaptive_tags(question)
+    release_tags = current_release_tags(adaptive_tags)
+    if release_tags:
+        score += min(10.0, len(release_tags) * 4.0)
+        reasons.append("2026現行トピック: " + ", ".join(release_tags[:2]))
 
     narrow_hits = narrow_scope_hits(question)
     if narrow_hits:
@@ -1544,12 +1653,17 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
     scored = []
     for question in payload["questions"]:
         score, reasons, topic_tags = curation_score(question)
+        adaptive_tags = extract_adaptive_tags(question)
+        release_tags = current_release_tags(adaptive_tags)
         scored.append(
             {
                 "question": question,
                 "score": score,
                 "reasons": reasons,
                 "topic_tags": topic_tags,
+                "adaptive_tags": adaptive_tags,
+                "release_tags": release_tags,
+                "base_difficulty": base_difficulty_seed(question, adaptive_tags),
                 "cluster_key": cluster_key(question, topic_tags),
             }
         )
@@ -1614,6 +1728,11 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "yield_score": round(item["score"], 2),
                 "yield_reasons": item["reasons"],
                 "topic_tags": item["topic_tags"],
+                "concept_tags": item["adaptive_tags"],
+                "current_service_tags": item["release_tags"],
+                "current_relevance_score": round(min(1.0, 0.22 + len(item["release_tags"]) * 0.22), 2),
+                "base_difficulty": item["base_difficulty"],
+                "exam_weight": TOP_DOMAINS[question["top_domain"]]["weight"],
                 "source_set": question["source_set"],
                 "source_number": question["source_number"],
                 "source_status_correct": question["source_status_correct"],
@@ -1639,11 +1758,13 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
         "built_at": iso_now(),
         "source": payload["source"],
         "selection_policy": [
-            "2026年向け6ドメイン配分で600問に圧縮",
+            "2026年1月更新の公式CSAブループリント配分で600問に圧縮",
             "高品質バンク・学習領域メタデータ・解説の厚さを優先",
+            "2026年4月時点の現行ServiceNow文脈に近いトピックを追加加点",
             "コア論点の被りを抑えつつ、弱点化しやすい複数選択を少し厚めに採用",
             "2週間・1日2-3時間の前提で回せる量に制限",
         ],
+        "official_context": OFFICIAL_EXAM_CONTEXT,
         "meta": {
             "curated_count": len(selected_questions),
             "full_question_count": payload["question_count"],

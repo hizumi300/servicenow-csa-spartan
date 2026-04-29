@@ -8,7 +8,7 @@
     },
     {
       "source": "/",
-      "destination": "/docs/index.html"
+      "destination": "/docs"
     },
     {
       "source": "/data/:path*",

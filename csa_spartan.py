@@ -879,6 +879,25 @@ def iso_now() -> str:
     return now_local().isoformat(timespec="seconds")
 
 
+def sanitize_source_label(source: object) -> str:
+    if source is None:
+        return "ServiseNow-CSA-Questions"
+    raw = str(source).strip()
+    if not raw:
+        return "ServiseNow-CSA-Questions"
+    path = Path(raw)
+    if path.name.lower() == "txt.rtf" and path.parent.name:
+        parent_name = path.parent.name
+        if parent_name.lower().endswith(".rtfd"):
+            parent_name = parent_name[:-5]
+        return parent_name or "ServiseNow-CSA-Questions"
+    if path.stem and path.stem.lower() != "txt":
+        return path.stem
+    if path.name:
+        return path.name
+    return "ServiseNow-CSA-Questions"
+
+
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text.replace("\xa0", " "))
     return text.strip()
@@ -1529,7 +1548,7 @@ def build_dataset(source: Path, force: bool = False) -> Dict[str, object]:
 
     payload = {
         "built_at": iso_now(),
-        "source": str(source),
+        "source": sanitize_source_label(source),
         "question_count": len(questions),
         "questions": questions,
     }
@@ -3188,7 +3207,7 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
     plan = study_plan(selected_questions, days=days, daily_hours=daily_hours)
     return {
         "built_at": iso_now(),
-        "source": payload["source"],
+        "source": sanitize_source_label(payload["source"]),
         "selection_policy": [
             "2026年1月更新の公式CSAブループリント配分で600問に圧縮",
             "高品質バンク・学習領域メタデータ・解説の厚さを優先",

@@ -8,7 +8,7 @@
       name="description"
       content="ServiceNow CSA向けに1434問から600問へ圧縮した、2週間スパルタ学習アプリ。"
     >
-    <link rel="stylesheet" href="./styles.css?v=20260428-ml5">
+    <link rel="stylesheet" href="./styles.css?v=20260429-ml6">
   </head>
   <body>
     <div class="app-shell">
@@ -40,6 +40,12 @@
             <span class="stat-label">今日の目標</span>
             <strong id="stat-today">-</strong>
             <small id="stat-today-sub">Day 1を始めろ</small>
+            <div class="stat-progress">
+              <div class="bar">
+                <div id="stat-today-fill" class="bar-fill" style="width:0%"></div>
+              </div>
+              <small id="stat-today-progress">0 / 0達成</small>
+            </div>
           </article>
           <article class="stat-card">
             <span class="stat-label">推定合格率</span>
@@ -168,7 +174,6 @@
             </div>
             <div id="hint-box" class="hint-box hidden"></div>
             <div id="result-box" class="result-box hidden"></div>
-            <div id="confidence-box" class="confidence-box hidden"></div>
             <div id="contrastive-box" class="hint-box hidden"></div>
           </article>
         </section>
@@ -194,7 +199,6 @@
             <div id="mock-question" class="question-card empty">
               <p>まだ始まっていない。始めろ。</p>
             </div>
-            <div id="mock-confidence-box" class="confidence-box hidden"></div>
             <div class="question-actions">
               <button id="mock-prev" class="ghost-button small" disabled>前へ</button>
               <button id="mock-save" class="primary-button small" disabled>回答を保存</button>
@@ -224,6 +228,6 @@
       </main>
     </div>
 
-    <script type="module" src="./app.js?v=20260428-ml5"></script>
+    <script type="module" src="./app.js?v=20260429-ml6"></script>
   </body>
 </html>

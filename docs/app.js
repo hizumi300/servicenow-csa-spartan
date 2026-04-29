@@ -1,5 +1,5 @@
 const DATA_URL = "./data/csa600.json";
-const STORAGE_KEYS = ["csaSpartanState:v4", "csaSpartanState:v3", "csaSpartanState:v2"];
+const STORAGE_KEYS = ["csaSpartanState:v5", "csaSpartanState:v4", "csaSpartanState:v3", "csaSpartanState:v2"];
 const STORAGE_KEY = STORAGE_KEYS[0];
 const TARGET_RECALL = 0.62;
 const BASE_LR = 0.18;
@@ -9,12 +9,6 @@ const ACTIVE_SET_STEP = 20;
 const ACTIVE_SET_DEFAULT = 480;
 const SHADOW_LOG_LIMIT = 240;
 const SHADOW_STORAGE_KEY = "csaSpartanShadow:v1";
-
-const CONFIDENCE_META = {
-  confident: { label: "自信あり" },
-  unsure: { label: "迷った" },
-  guess: { label: "勘" },
-};
 
 const CONCEPT_LABELS_JA = {
   platform_overview: "プラットフォーム概要",
@@ -55,7 +49,6 @@ const state = {
   user: null,
   currentQuestionId: null,
   currentSelections: [],
-  currentConfidenceKey: null,
   currentQuestionModel: null,
   currentQuestionSource: "active_pool",
   currentContrastiveItem: null,
@@ -92,6 +85,8 @@ function cacheElements() {
     "stat-days",
     "stat-today",
     "stat-today-sub",
+    "stat-today-fill",
+    "stat-today-progress",
     "stat-pass",
     "stat-pass-sub",
     "today-badge",
@@ -110,7 +105,6 @@ function cacheElements() {
     "question-rationale",
     "hint-box",
     "result-box",
-    "confidence-box",
     "contrastive-box",
     "hint-button",
     "submit-answer",
@@ -125,7 +119,6 @@ function cacheElements() {
     "mock-progress",
     "mock-strategy-strip",
     "mock-question",
-    "mock-confidence-box",
     "mock-prev",
     "mock-save",
     "mock-next",
@@ -194,7 +187,6 @@ function bindEvents() {
     state.user = defaultUserState();
     state.currentQuestionId = null;
     state.currentSelections = [];
-    state.currentConfidenceKey = null;
     state.currentQuestionModel = null;
     state.currentQuestionSource = "active_pool";
     state.currentContrastiveItem = null;
@@ -281,14 +273,6 @@ async function ensureLiveOfficialEvidence(question, force = false) {
   }
 }
 
-function defaultConfidenceMix() {
-  return {
-    confident: 0,
-    unsure: 0,
-    guess: 0,
-  };
-}
-
 function defaultAttemptRecord() {
   return {
     total: 0,
@@ -302,8 +286,6 @@ function defaultAttemptRecord() {
     lastPredictedRecall: null,
     lastKnowledgeProb: null,
     lastHintsUsed: 0,
-    lastConfidence: null,
-    confidenceCounts: defaultConfidenceMix(),
     history: [],
   };
 }
@@ -312,9 +294,6 @@ function defaultFamilyRecord() {
   return {
     exposures: 0,
     misses: 0,
-    unsure: 0,
-    guesses: 0,
-    confidentMisses: 0,
     lastSeenAt: null,
     lastIncorrectAt: null,
     questionIds: [],
@@ -348,9 +327,8 @@ function defaultUserState() {
     contrastiveQueue: [],
     mockSession: null,
     analytics: {
-      drill: {
-        confidenceMix: defaultConfidenceMix(),
-      },
+      drill: {},
+      dailyProgress: {},
       mockHistory: [],
     },
   };
@@ -361,10 +339,6 @@ function normalizeAttemptRecord(record) {
     ...defaultAttemptRecord(),
     ...record,
     lastAnswer: Array.isArray(record?.lastAnswer) ? record.lastAnswer : [],
-    confidenceCounts: {
-      ...defaultConfidenceMix(),
-      ...(record?.confidenceCounts || {}),
-    },
     history: Array.isArray(record?.history) ? record.history : [],
   };
 }
@@ -403,10 +377,10 @@ function normalizeMockSession(session) {
   Object.entries(session.answers || {}).forEach(([questionId, answer]) => {
     answers[questionId] = {
       selectedIds: Array.isArray(answer?.selectedIds) ? answer.selectedIds : [],
-      confidenceKey: answer?.confidenceKey || null,
       touchedAt: answer?.touchedAt || null,
       savedAt: answer?.savedAt || null,
       changeCount: numberOr(answer?.changeCount, 0),
+      countedDayKey: answer?.countedDayKey || null,
     };
   });
   return {
@@ -419,6 +393,24 @@ function normalizeMockSession(session) {
     finished: Boolean(session.finished),
     summary: session.summary || null,
   };
+}
+
+function normalizeDailyProgressMap(raw) {
+  if (!raw || typeof raw !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(raw).map(([dayKey, value]) => [
+      dayKey,
+      {
+        solved: numberOr(value?.solved, 0),
+        correct: numberOr(value?.correct, 0),
+        wrong: numberOr(value?.wrong, 0),
+        review: numberOr(value?.review, 0),
+        fresh: numberOr(value?.fresh, 0),
+        mock: numberOr(value?.mock, 0),
+        drill: numberOr(value?.drill, 0),
+      },
+    ])
+  );
 }
 
 function migrateState(raw) {
@@ -468,11 +460,8 @@ function migrateState(raw) {
       drill: {
         ...base.analytics.drill,
         ...(raw?.analytics?.drill || {}),
-        confidenceMix: {
-          ...base.analytics.drill.confidenceMix,
-          ...(raw?.analytics?.drill?.confidenceMix || {}),
-        },
       },
+      dailyProgress: normalizeDailyProgressMap(raw?.analytics?.dailyProgress),
       mockHistory: Array.isArray(raw?.analytics?.mockHistory) ? raw.analytics.mockHistory : [],
     },
   };
@@ -494,7 +483,7 @@ function migrateState(raw) {
 
   next.contrastiveQueue = normalizeContrastiveQueue(raw?.contrastiveQueue);
   next.mockSession = normalizeMockSession(raw?.mockSession);
-  next.version = 4;
+  next.version = 5;
   return next;
 }
 
@@ -580,6 +569,20 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function localDayKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dayKeyFromIso(iso) {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return localDayKey(date);
+}
+
 function hoursSince(iso) {
   if (!iso) return Number.POSITIVE_INFINITY;
   return Math.max(0, (Date.now() - new Date(iso).getTime()) / 3600000);
@@ -623,20 +626,6 @@ function conceptLabelJa(tag) {
 
 function questionById(questionId) {
   return state.questionMap.get(questionId);
-}
-
-function confidenceLabel(key, correct = null) {
-  if (key === "guess" && correct === true) return "当てた";
-  if (key === "guess" && correct === false) return "勘で外した";
-  return CONFIDENCE_META[key]?.label || "未設定";
-}
-
-function confidenceChoicesForMock() {
-  return [
-    { key: "confident", label: "自信あり" },
-    { key: "unsure", label: "迷った" },
-    { key: "guess", label: "勘" },
-  ];
 }
 
 function defaultBanditArm() {
@@ -687,7 +676,7 @@ function banditDetailForQuestion(question, signals = null) {
     clamp(1 - Math.abs(detail.model.knowledgeProb - 0.64) / 0.64, 0, 1) * 0.42 +
     clamp(1 - detail.model.predictedRecall, 0, 1) * 0.38 +
     detail.confusionPressure * 0.12 +
-    detail.confidencePressure * 0.08 +
+    detail.mistakePressure * 0.08 +
     detail.shadowBoost * 0.12;
 
   return {
@@ -741,7 +730,7 @@ function nearestActiveWorkingSetSize(value) {
 function activeWorkingSetRecommendation() {
   const config = activePoolConfig();
   const stats = reviewedStats();
-  const confidence = recentConfidenceStats();
+  const mistakes = recentMistakeStats();
   const concepts = conceptRows();
   const pass = passProbability();
   const uncoveredCore = concepts.filter((row) => row.seen === 0 && row.examMass >= 0.16).length;
@@ -755,9 +744,9 @@ function activeWorkingSetRecommendation() {
     size -= Math.min(70, stats.dueNow * 2.2);
     reasons.push(`期限切れ ${stats.dueNow}問が多いので圧縮`);
   }
-  if (confidence.confidentWrong >= 3) {
-    size -= Math.min(50, confidence.confidentWrong * 8);
-    reasons.push(`自信あり誤答 ${confidence.confidentWrong}件を先に矯正`);
+  if (mistakes.recentWrong >= 4) {
+    size -= Math.min(50, mistakes.recentWrong * 7);
+    reasons.push(`直近誤答 ${mistakes.recentWrong}件を先に矯正`);
   }
   if (backlog >= 6) {
     size -= Math.min(30, backlog * 2.6);
@@ -767,7 +756,7 @@ function activeWorkingSetRecommendation() {
     size += Math.min(60, uncoveredCore * 7 + weakLowCoverage * 2.5);
     reasons.push(`未カバー概念 ${uncoveredCore} / 薄い弱点 ${weakLowCoverage} を広めに拾う`);
   }
-  if (pass >= 0.7 && stats.dueNow < 12 && confidence.confidentWrong < 3) {
+  if (pass >= 0.7 && stats.dueNow < 12 && mistakes.recentWrong < 4) {
     size += 40;
     reasons.push("合格圏に近いので裾野を広げる");
   }
@@ -778,7 +767,8 @@ function activeWorkingSetRecommendation() {
     dueNow: stats.dueNow,
     uncoveredCore,
     weakLowCoverage,
-    confidentWrong: confidence.confidentWrong,
+    recentWrong: mistakes.recentWrong,
+    hintHeavyCorrect: mistakes.hintHeavyCorrect,
     backlog,
     pass,
     reasons: reasons.length ? reasons : ["現在は標準レンジで維持"],
@@ -933,14 +923,15 @@ function domainReadinessRows() {
     const predictedMastery = average(models.map((model) => model.masteryProb), 0.42);
     const predictedRecall = average(models.map((model) => model.predictedRecall), 0.42);
     const dueNow = questions.filter((question, index) => attempts[index].total > 0 && models[index].dueInHours <= 0).length;
-    const confidenceGap = average(
+    const hintDependency = average(
       attempts.map((record) => {
-        const total = (record.confidenceCounts?.confident || 0) + (record.confidenceCounts?.unsure || 0) + (record.confidenceCounts?.guess || 0);
-        return total ? ((record.confidenceCounts?.confident || 0) + (record.confidenceCounts?.guess || 0)) / total : 0;
+        const history = record.history || [];
+        if (!history.length) return 0;
+        return history.filter((entry) => entry.correct === true && (entry.hintsUsed || 0) > 0).length / history.length;
       }),
       0
     );
-    const readiness = predictedMastery * 0.64 + empiricalAccuracy * 0.18 + predictedRecall * 0.12 - confidenceGap * 0.06;
+    const readiness = predictedMastery * 0.64 + empiricalAccuracy * 0.18 + predictedRecall * 0.12 - hintDependency * 0.06;
     return {
       ...domain,
       reviewed,
@@ -1012,7 +1003,7 @@ function passProbability() {
     Object.values(state.user.confusion.families).map((family) => {
       const exposures = family.exposures || 0;
       if (!exposures) return 0;
-      return (family.misses + family.confidentMisses * 0.6) / exposures;
+      return family.misses / exposures;
     }),
     0
   );
@@ -1050,6 +1041,92 @@ function adaptiveTodaySummary() {
     weakDomains,
     baseline,
   };
+}
+
+function inferTodayProgress() {
+  const today = localDayKey();
+  const stats = {
+    solved: 0,
+    correct: 0,
+    wrong: 0,
+    review: 0,
+    fresh: 0,
+    mock: 0,
+    drill: 0,
+  };
+
+  Object.values(state.user.attempts || {}).forEach((record) => {
+    (record.history || []).forEach((entry, index) => {
+      if (dayKeyFromIso(entry.at) !== today) return;
+      stats.solved += 1;
+      stats.drill += 1;
+      if (entry.correct) stats.correct += 1;
+      else stats.wrong += 1;
+      if (index === 0) stats.fresh += 1;
+      else stats.review += 1;
+    });
+  });
+
+  const session = currentMockSession();
+  if (session) {
+    Object.entries(session.answers || {}).forEach(([questionId, answer]) => {
+      if (!answer?.savedAt || dayKeyFromIso(answer.savedAt) !== today) return;
+      if (!Array.isArray(answer.selectedIds) || answer.selectedIds.length === 0) return;
+      stats.solved += 1;
+      stats.mock += 1;
+      if (attemptRecord(questionId).total > 0) stats.review += 1;
+      else stats.fresh += 1;
+    });
+  }
+
+  return stats;
+}
+
+function todayProgressStats() {
+  const today = localDayKey();
+  const stored = state.user.analytics.dailyProgress?.[today];
+  const base =
+    stored && Object.values(stored).some((value) => numberOr(value, 0) > 0)
+      ? {
+          solved: numberOr(stored.solved, 0),
+          correct: numberOr(stored.correct, 0),
+          wrong: numberOr(stored.wrong, 0),
+          review: numberOr(stored.review, 0),
+          fresh: numberOr(stored.fresh, 0),
+          mock: numberOr(stored.mock, 0),
+          drill: numberOr(stored.drill, 0),
+        }
+      : inferTodayProgress();
+  const summary = adaptiveTodaySummary();
+  const progressRate = summary.target ? clamp(base.solved / summary.target, 0, 1) : 0;
+  return {
+    ...base,
+    target: summary.target,
+    remaining: Math.max(0, summary.target - base.solved),
+    progressRate,
+  };
+}
+
+function recordDailyProgress({ questionId, kind, correct = null, wasReview = false }) {
+  const today = localDayKey();
+  const progress = {
+    solved: 0,
+    correct: 0,
+    wrong: 0,
+    review: 0,
+    fresh: 0,
+    mock: 0,
+    drill: 0,
+    ...(state.user.analytics.dailyProgress?.[today] || {}),
+  };
+  progress.solved += 1;
+  if (correct === true) progress.correct += 1;
+  if (correct === false) progress.wrong += 1;
+  if (wasReview || attemptRecord(questionId).total > 0) progress.review += 1;
+  else progress.fresh += 1;
+  if (kind === "mock") progress.mock += 1;
+  else progress.drill += 1;
+  state.user.analytics.dailyProgress[today] = progress;
 }
 
 function currentDrillMode() {
@@ -1146,16 +1223,16 @@ function deltaMetadata(question) {
   };
 }
 
-function confidencePressureForQuestion(question) {
+function mistakePressureForQuestion(question) {
   const record = attemptRecord(question.id);
   const recent = (record.history || []).slice(-8);
   if (!recent.length) return 0;
 
   const pressure = recent.reduce((sum, entry) => {
-    if (entry.confidenceKey === "confident" && entry.correct === false) return sum + 1.12;
-    if (entry.confidenceKey === "guess" && entry.correct === true) return sum + 0.78;
-    if (entry.confidenceKey === "unsure") return sum + 0.42;
-    if (entry.confidenceKey === "confident" && entry.correct === true) return sum - 0.22;
+    if (entry.correct === false) return sum + 1.0;
+    if ((entry.hintsUsed || 0) >= 2) return sum + 0.46;
+    if ((entry.hintsUsed || 0) === 1) return sum + 0.22;
+    if (entry.correct === true && (entry.hintsUsed || 0) === 0) return sum - 0.12;
     return sum;
   }, 0);
 
@@ -1168,10 +1245,9 @@ function confusionPressureForQuestion(question) {
   if (!exposures) return state.user.contrastiveQueue.some((item) => item.questionId === question.id) ? 0.42 : 0;
 
   const queueBoost = state.user.contrastiveQueue.some((item) => item.questionId === question.id) ? 0.42 : 0;
-  const missRate = (family.misses + family.guesses * 0.7 + family.unsure * 0.4) / exposures;
-  const confidentMissRate = (family.confidentMisses || 0) / exposures;
+  const missRate = family.misses / exposures;
   const recencyBoost = family.lastIncorrectAt ? clamp((72 - hoursSince(family.lastIncorrectAt)) / 72, 0, 1) * 0.34 : 0;
-  return clamp(missRate + confidentMissRate * 0.7 + recencyBoost + queueBoost, 0, 1.6);
+  return clamp(missRate + recencyBoost + queueBoost, 0, 1.6);
 }
 
 function questionSignals(question, domainKey = null, domainLookup = null) {
@@ -1189,7 +1265,7 @@ function questionSignals(question, domainKey = null, domainLookup = null) {
   const unseenBoost = record.total === 0 ? 0.34 : 0;
   const difficultyFit = clamp(1 - Math.abs(model.knowledgeProb - 0.63) / 0.63, 0, 1);
   const focusBoost = domainKey && domainKey === question.domain_key ? 0.3 : 0;
-  const confidencePressure = confidencePressureForQuestion(question);
+  const mistakePressure = mistakePressureForQuestion(question);
   const confusionPressure = confusionPressureForQuestion(question);
   const delta = deltaMetadata(question);
   const deltaBoost = delta.active ? clamp(delta.priority, 0.18, 1.3) : 0;
@@ -1206,7 +1282,7 @@ function questionSignals(question, domainKey = null, domainLookup = null) {
     unseenBoost,
     difficultyFit,
     focusBoost,
-    confidencePressure,
+    mistakePressure,
     confusionPressure,
     delta,
     deltaBoost,
@@ -1229,7 +1305,7 @@ function activePoolScoreForQuestion(question, signals = null) {
     detail.dueUrgency * 22 +
     detail.weakConceptPenalty * 18 +
     (1 - detail.domainReadiness) * 16 +
-    detail.confidencePressure * 18 +
+    detail.mistakePressure * 18 +
     detail.confusionPressure * 20 +
     (question.current_relevance_score || 0) * 18 +
     detail.unseenBoost * 12 +
@@ -1257,7 +1333,7 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
     detail.dueUrgency * 18 +
     detail.difficultyFit * 12 +
     detail.focusBoost * 12 +
-    detail.confidencePressure * 10 +
+    detail.mistakePressure * 10 +
     detail.confusionPressure * 12 +
     (question.current_relevance_score || 0) * 12 +
     detail.deltaBoost * 12 +
@@ -1269,7 +1345,7 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
   const reasons = [];
   if (contrastiveItem) reasons.push(`混同対比: ${contrastiveItem.reason}`);
   if (detail.confusionPressure >= 0.72) reasons.push("混同ファミリーの取り違えを矯正");
-  if (detail.confidencePressure >= 0.62) reasons.push("自信と実力のズレを補正");
+  if (detail.mistakePressure >= 0.62) reasons.push("直近の誤答傾向を優先矯正");
   if (bandit.uncertaintyBonus >= 1.1) reasons.push("contextual bandit が探索価値ありと判定");
   if (bandit.irtGainPotential >= 0.7) reasons.push("IRT上の学習利得が大きい");
   if (detail.model.shadowPromoted && detail.shadowBoost >= 0.55) {
@@ -1289,7 +1365,7 @@ function recommendationForQuestion(question, domainKey = null, domainLookup = nu
     weakConceptPenalty: detail.weakConceptPenalty,
     activePoolScore: poolInfo.score,
     backendPoolScore: poolInfo.backendScore,
-    confidencePressure: detail.confidencePressure,
+    mistakePressure: detail.mistakePressure,
     confusionPressure: detail.confusionPressure,
     bandit,
     delta: detail.delta,
@@ -1345,7 +1421,7 @@ function selectionPolicyLines() {
   const shadow = shadowModelSummary();
   return [
     ...state.dataset.selection_policy,
-    `稼働セット ${activeWorkingSetSize()}問。${auto ? "自動制御" : "手動固定"}で、自信度 / 混同圧 / 現行性 / 復習期限を混ぜた hybrid を回す。`,
+    `稼働セット ${activeWorkingSetSize()}問。${auto ? "自動制御" : "手動固定"}で、誤答傾向 / 混同圧 / 現行性 / 復習期限を混ぜた hybrid を回す。`,
     "重複グループや canonical 候補は、アクティブプールでまず散らして偏りを抑える。",
     shadow.promoted
       ? `shadow ${String(shadow.active_model).toUpperCase()} を本番選問へ昇格。理由: ${shadow.promotion_reason}`
@@ -1380,20 +1456,20 @@ function contrastiveSimilarity(left, right) {
   return score;
 }
 
-function queueContrastiveItems(sourceQuestion, correct, confidenceKey) {
-  const shouldQueue = !correct || confidenceKey !== "confident";
+function queueContrastiveItems(sourceQuestion, correct, hintsUsed) {
+  const shouldQueue = !correct || hintsUsed > 0;
   if (!shouldQueue) return [];
 
-  const cap = !correct && confidenceKey === "confident" ? 3 : 2;
+  const cap = !correct ? (sourceQuestion.multi_select ? 3 : 2) : 2;
   const candidates = relatedQuestionsFor(sourceQuestion).slice(0, cap);
   const queued = [];
   const queueById = new Map(state.user.contrastiveQueue.map((item) => [item.questionId, item]));
 
   candidates.forEach((question) => {
-    const intensity = contrastiveSimilarity(sourceQuestion, question) + (!correct ? 1.1 : 0.4);
+    const intensity = contrastiveSimilarity(sourceQuestion, question) + (!correct ? 1.1 : 0.35) + hintsUsed * 0.14;
     const reason = !correct
       ? `${sourceQuestion.id} と論点が近い。誤差分を対比で潰す`
-      : `${sourceQuestion.id} は曖昧だった。近接論点で境界を固める`;
+      : `${sourceQuestion.id} はヒント依存だった。近接論点で境界を固める`;
     const nextItem = {
       questionId: question.id,
       sourceQuestionId: sourceQuestion.id,
@@ -1418,7 +1494,7 @@ function consumeContrastiveItem(questionId) {
   state.user.contrastiveQueue = state.user.contrastiveQueue.filter((item) => item.questionId !== questionId);
 }
 
-function updateConfusionState(question, correct, confidenceKey) {
+function updateConfusionState(question, correct) {
   const key = primaryConfusionKey(question);
   const family = {
     ...defaultFamilyRecord(),
@@ -1426,9 +1502,6 @@ function updateConfusionState(question, correct, confidenceKey) {
   };
   family.exposures += 1;
   if (!correct) family.misses += 1;
-  if (confidenceKey === "unsure") family.unsure += 1;
-  if (confidenceKey === "guess") family.guesses += 1;
-  if (!correct && confidenceKey === "confident") family.confidentMisses += 1;
   family.lastSeenAt = nowIso();
   if (!correct) family.lastIncorrectAt = family.lastSeenAt;
   family.questionIds = unique([...family.questionIds, question.id]).slice(-8);
@@ -1452,42 +1525,31 @@ function updateConfusionState(question, correct, confidenceKey) {
   return key;
 }
 
-function confidenceOutcomeProfile(correct, confidenceKey, hintsUsed) {
+function objectiveOutcomeProfile(question, correct, hintsUsed) {
   if (correct) {
-    const profiles = {
-      confident: { observed: 0.98, lrAdjust: 0.02, retention: 1.16, amplifier: 1.06 },
-      unsure: { observed: 0.78, lrAdjust: 0, retention: 0.96, amplifier: 0.96 },
-      guess: { observed: 0.58, lrAdjust: -0.02, retention: 0.74, amplifier: 0.84 },
-    };
-    const profile = profiles[confidenceKey];
     return {
-      observed: clamp(profile.observed - hintsUsed * 0.08, 0.44, 1),
-      lrAdjust: profile.lrAdjust,
-      retention: clamp(profile.retention - hintsUsed * 0.05, 0.64, 1.18),
-      amplifier: profile.amplifier,
+      observed: clamp(0.94 - hintsUsed * 0.1 - (question.multi_select ? 0.03 : 0), 0.46, 0.99),
+      lrAdjust: hintsUsed > 0 ? -0.01 : 0.02,
+      retention: clamp(1.14 - hintsUsed * 0.08 - (question.multi_select ? 0.03 : 0), 0.66, 1.18),
+      amplifier: hintsUsed > 0 ? 0.94 : 1.04,
     };
   }
 
-  const profiles = {
-    confident: { observed: 0.04, lrAdjust: 0.03, retention: 0.58, amplifier: 1.18 },
-    unsure: { observed: 0.15, lrAdjust: 0.01, retention: 0.72, amplifier: 1.02 },
-    guess: { observed: 0.21, lrAdjust: -0.01, retention: 0.84, amplifier: 0.88 },
-  };
-  const profile = profiles[confidenceKey];
   return {
-    observed: clamp(profile.observed + hintsUsed * 0.03, 0.03, 0.32),
-    lrAdjust: profile.lrAdjust,
-    retention: profile.retention,
-    amplifier: profile.amplifier,
+    observed: clamp(0.08 + hintsUsed * 0.03 + (question.multi_select ? 0.02 : 0), 0.03, 0.32),
+    lrAdjust: 0.02,
+    retention: clamp(0.62 + hintsUsed * 0.05, 0.58, 0.86),
+    amplifier: question.multi_select ? 1.16 : 1.1,
   };
 }
 
-function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
+function applyAdaptiveUpdate(question, correct, userIds) {
   const learner = state.user.learner;
   const record = attemptRecord(question.id);
+  const seenBefore = record.total > 0;
   const before = state.currentQuestionModel || questionModel(question);
   const hintsUsed = state.hintLevel;
-  const profile = confidenceOutcomeProfile(correct, confidenceKey, hintsUsed);
+  const profile = objectiveOutcomeProfile(question, correct, hintsUsed);
   const error = (profile.observed - before.knowledgeProb) * profile.amplifier;
   const lr = clamp(BASE_LR - question.base_difficulty * 0.05 + profile.lrAdjust, 0.1, 0.28);
 
@@ -1504,7 +1566,7 @@ function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
   );
   learner.questionDiscrimination[question.id] = clamp(
     (learner.questionDiscrimination[question.id] || 0) +
-      ((Math.abs(error) > 0.18 ? 1 : -1) * lr * 0.04 + (confidenceKey === "confident" && !correct ? 0.02 : 0)),
+      ((Math.abs(error) > 0.18 ? 1 : -1) * lr * 0.04 + (!correct && hintsUsed === 0 ? 0.02 : 0)),
     -0.35,
     0.5
   );
@@ -1536,8 +1598,6 @@ function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
   record.lastPredictedRecall = before.predictedRecall;
   record.lastKnowledgeProb = before.knowledgeProb;
   record.lastHintsUsed = hintsUsed;
-  record.lastConfidence = confidenceKey;
-  record.confidenceCounts[confidenceKey] = (record.confidenceCounts[confidenceKey] || 0) + 1;
   record.halfLifeHours = clamp(nextHalfLife, 2, 720);
   record.dueAt = new Date(Date.now() + dueIntervalHours(nextHalfLife) * 3600000).toISOString();
   record.history = [
@@ -1550,32 +1610,33 @@ function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
       knowledgeProb: before.knowledgeProb,
       hintsUsed,
       halfLifeHours: record.halfLifeHours,
-      confidenceKey,
       questionSource: state.currentQuestionSource,
       contrastiveFrom: state.currentContrastiveItem?.sourceQuestionId || null,
     },
   ].slice(-36);
   state.user.attempts[question.id] = record;
 
-  state.user.analytics.drill.confidenceMix[confidenceKey] =
-    (state.user.analytics.drill.confidenceMix[confidenceKey] || 0) + 1;
+  recordDailyProgress({
+    questionId: question.id,
+    kind: "drill",
+    correct,
+    wasReview: seenBefore,
+  });
 
-  const familyKey = updateConfusionState(question, correct, confidenceKey);
+  const familyKey = updateConfusionState(question, correct);
   consumeContrastiveItem(question.id);
-  const queued = queueContrastiveItems(question, correct, confidenceKey);
+  const queued = queueContrastiveItems(question, correct, hintsUsed);
   const after = questionModel(question);
   const reward =
     clamp(after.predictedRecall - before.predictedRecall + (correct ? 0.16 : -0.08), -0.3, 0.6) +
-    clamp(profile.observed - 0.5, -0.2, 0.22) +
-    (confidenceKey === "confident" && !correct ? 0.06 : 0) +
-    (confidenceKey === "guess" && correct ? 0.05 : 0);
+    clamp(profile.observed - 0.5, -0.2, 0.22) -
+    hintsUsed * 0.03;
   updateBanditState(question, reward, correct);
   saveUserState();
 
   shadowLog("drill_answer_recorded", {
     questionId: question.id,
     correct,
-    confidenceKey,
     hintsUsed,
     selectedChoiceIds: userIds,
     presentedAt: state.currentQuestionServedAt,
@@ -1599,7 +1660,6 @@ function applyAdaptiveUpdate(question, correct, userIds, confidenceKey) {
     after,
     record,
     hintsUsed,
-    confidenceKey,
     familyKey,
     reward,
     queued,
@@ -1707,8 +1767,11 @@ function renderHero() {
   els["stat-curated"].textContent = `${state.dataset.meta.curated_count}`;
   els["stat-days"].textContent = `${state.dataset.plan.days}日`;
   const adaptiveToday = adaptiveTodaySummary();
+  const todayProgress = todayProgressStats();
   els["stat-today"].textContent = `${adaptiveToday.target}問`;
   els["stat-today-sub"].textContent = `復習 ${adaptiveToday.reviewTarget} / 新規 ${adaptiveToday.newTarget} | 稼働 ${activeWorkingSetSize()}`;
+  els["stat-today-fill"].style.width = `${Math.round(todayProgress.progressRate * 100)}%`;
+  els["stat-today-progress"].textContent = `${todayProgress.solved} / ${adaptiveToday.target}達成`;
 
   const probability = passProbability();
   els["stat-pass"].textContent = `${Math.round(probability * 100)}%`;
@@ -1748,11 +1811,15 @@ function renderDashboard() {
 }
 
 function renderTodayBox(summary) {
+  const todayProgress = todayProgressStats();
   const div = document.createElement("div");
   div.className = "today-box";
   div.innerHTML = `
     <strong>${summary.baseline.label} | ${summary.baseline.message}</strong>
     <div>ML目標: ${summary.target}問</div>
+    <div>今日の進捗: ${todayProgress.solved} / ${summary.target}問 | 正解 ${todayProgress.correct} / 誤答 ${todayProgress.wrong}</div>
+    <div class="bar"><div class="bar-fill" style="width:${Math.round(todayProgress.progressRate * 100)}%"></div></div>
+    <div class="muted">新規 ${todayProgress.fresh} / 復習 ${todayProgress.review} / drill ${todayProgress.drill} / mock ${todayProgress.mock}</div>
     <div>内訳: 復習 ${summary.reviewTarget} / 新規 ${summary.newTarget} / 期限切れ ${summary.dueNow}</div>
     <div>想定時間: 約${state.dataset.meta.daily_hours}時間</div>
     <div>重点分野: ${summary.weakDomains.map((row) => `${row.label_ja} ${Math.round(row.readiness * 100)}%`).join(" / ")}</div>
@@ -1778,7 +1845,7 @@ function renderProgressRow(domain) {
   return wrap;
 }
 
-function recentConfidenceStats() {
+function recentMistakeStats() {
   const entries = Object.entries(state.user.attempts)
     .flatMap(([questionId, record]) =>
       (record.history || []).map((entry) => ({
@@ -1791,9 +1858,12 @@ function recentConfidenceStats() {
 
   return {
     total: entries.length,
-    confidentWrong: entries.filter((entry) => entry.confidenceKey === "confident" && entry.correct === false).length,
-    guessedRight: entries.filter((entry) => entry.confidenceKey === "guess" && entry.correct === true).length,
-    unsure: entries.filter((entry) => entry.confidenceKey === "unsure").length,
+    recentWrong: entries.filter((entry) => entry.correct === false).length,
+    hintHeavyCorrect: entries.filter((entry) => entry.correct === true && (entry.hintsUsed || 0) >= 1).length,
+    multiSelectMisses: entries.filter((entry) => {
+      const question = questionById(entry.questionId);
+      return question?.multi_select && entry.correct === false;
+    }).length,
   };
 }
 
@@ -1804,7 +1874,7 @@ function renderModelSummary() {
   const official = state.dataset.official_context;
   const shadow = shadowModelSummary();
   const dueNow = reviewedStats().dueNow;
-  const confidenceStats = recentConfidenceStats();
+  const mistakeStats = recentMistakeStats();
   const contrastiveBacklog = state.user.contrastiveQueue.length;
   els["model-summary"].innerHTML = `
     <div class="today-box">
@@ -1812,7 +1882,7 @@ function renderModelSummary() {
       <div>総合理解度: ${Math.round(readiness * 100)}%</div>
       <div>推定合格率: ${Math.round(probability * 100)}%</div>
       <div>今すぐ再出題すべき問題: ${dueNow}問</div>
-      <div>直近の自信あり誤答: ${confidenceStats.confidentWrong}件 | 当てた寄り: ${confidenceStats.guessedRight}件</div>
+      <div>直近の誤答: ${mistakeStats.recentWrong}件 | ヒント依存正解: ${mistakeStats.hintHeavyCorrect}件</div>
       <div>混同キュー残: ${contrastiveBacklog}件</div>
       <div>最弱ドメイン: ${rows.slice(0, 3).map((row) => row.label_ja).join(" / ")}</div>
       <div>Shadow: ${shadow.promoted ? `${String(shadow.active_model).toUpperCase()} 昇格済み` : "baseline維持"} | 検証 ${shadow.valid_examples || 0}例</div>
@@ -1901,7 +1971,7 @@ function renderActivePoolSummary() {
       <strong>今の稼働面</strong>
       <div>${summary.size}問を常時ワーキングセット化 ${summary.manual ? "(手動固定)" : "(自動制御)"}</div>
       <div>期限切れ ${summary.dueNow} / 未着手 ${summary.unseen} / 現行差分 ${summary.delta} / 混同補正 ${summary.confusion}</div>
-      <div>推奨サイズ ${summary.recommendation.recommended}問 | 自信あり誤答 ${summary.recommendation.confidentWrong} / 未カバー中核 ${summary.recommendation.uncoveredCore}</div>
+      <div>推奨サイズ ${summary.recommendation.recommended}問 | 直近誤答 ${summary.recommendation.recentWrong} / 未カバー中核 ${summary.recommendation.uncoveredCore}</div>
       <div>厚めのドメイン: ${summary.topDomains.join(" / ") || "全体分散"}</div>
       <div class="muted">${summary.recommendation.reasons.join(" / ")}</div>
       <div class="muted">backend の active_pool_score を持つ問題: ${summary.backendScored}問。足りない分は front 側で補完する。</div>
@@ -1928,10 +1998,7 @@ function renderContrastiveSummary() {
   const families = Object.entries(state.user.confusion.families || {})
     .map(([key, family]) => ({
       key,
-      pressure:
-        family.exposures > 0
-          ? (family.misses + family.guesses * 0.7 + family.confidentMisses * 0.6) / family.exposures
-          : 0,
+      pressure: family.exposures > 0 ? family.misses / family.exposures : 0,
     }))
     .sort((a, b) => b.pressure - a.pressure)
     .slice(0, 2);
@@ -1942,7 +2009,7 @@ function renderContrastiveSummary() {
       <div>保留 ${state.user.contrastiveQueue.length}件</div>
       <div>濃いファミリー: ${families.map((item) => item.key).join(" / ") || "まだなし"}</div>
       <div class="mini-stack">
-        ${items.length ? items.join("") : '<div class="muted">不正解や曖昧正解が出ると、近接論点をここへ積む。</div>'}
+        ${items.length ? items.join("") : '<div class="muted">不正解やヒント依存正解が出ると、近接論点をここへ積む。</div>'}
       </div>
     </div>
   `;
@@ -2041,7 +2108,6 @@ function clearCurrentQuestion() {
   els["question-card"].innerHTML = "<p>出題ボタンを押せ。逃げるな。</p>";
   els["hint-box"].classList.add("hidden");
   els["result-box"].classList.add("hidden");
-  els["confidence-box"].classList.add("hidden");
   els["contrastive-box"].classList.add("hidden");
   els["hint-button"].disabled = true;
   els["submit-answer"].disabled = true;
@@ -2058,7 +2124,6 @@ function loadNextDrillQuestion() {
 
   state.currentQuestionId = next.question.id;
   state.currentSelections = [];
-  state.currentConfidenceKey = null;
   state.currentQuestionModel = next.rec.model;
   state.currentQuestionSource = next.source || "active_pool";
   state.currentContrastiveItem = next.queueItem || next.rec.contrastiveItem || null;
@@ -2132,7 +2197,7 @@ function renderCurrentQuestion() {
     <strong>Hybrid推薦理由</strong>
     <div>${rec.reasons.join(" / ")}</div>
     <div class="muted">概念: ${(question.concept_tags || []).map(conceptLabelJa).join(" / ") || "未分類"} | 現行トピック: ${(question.current_service_tags || []).map(conceptLabelJa).join(" / ") || "なし"}</div>
-    <div class="muted">混同キー: ${escapeHtml(familyKey)} | 自信圧 ${Math.round(rec.confidencePressure * 100)} / 混同圧 ${Math.round(rec.confusionPressure * 100)}</div>
+    <div class="muted">混同キー: ${escapeHtml(familyKey)} | 誤答圧 ${Math.round(rec.mistakePressure * 100)} / 混同圧 ${Math.round(rec.confusionPressure * 100)}</div>
     <div class="muted">IRT難度 ${rec.model.irtDifficulty.toFixed(2)} / 識別力 ${rec.model.irtDiscrimination.toFixed(2)} / bandit利得 ${Math.round(rec.bandit.expectedReward * 100)} / 探索 ${Math.round(rec.bandit.uncertaintyBonus * 100)}</div>
     ${
       rec.model.shadowPromoted
@@ -2162,7 +2227,6 @@ function renderCurrentQuestion() {
   });
 
   els["question-card"].append(prompt, choiceList);
-  renderDrillConfidenceBox();
   renderCurrentContrastiveBox();
 
   els["hint-box"].classList.add("hidden");
@@ -2180,37 +2244,6 @@ function renderCurrentQuestion() {
   updateDrillSubmitDisabled();
 }
 
-function renderDrillConfidenceBox() {
-  const wrap = els["confidence-box"];
-  wrap.className = "confidence-box";
-  if (state.currentQuestionLocked) {
-    wrap.classList.add("locked");
-    wrap.innerHTML = `
-      <strong>記録した手応え</strong>
-      <div>${confidenceLabel(state.currentConfidenceKey, state.currentQuestionFeedback?.correct)}</div>
-      <div class="muted">この自信度は学習更新と模試分析に使う。</div>
-    `;
-    return;
-  }
-
-  wrap.classList.remove("hidden", "locked");
-  wrap.innerHTML = `
-    <strong>採点前に手応えを打て</strong>
-    <div class="button-strip"></div>
-    <div class="muted">必須。自信度を入れてから採点する。</div>
-  `;
-
-  const strip = wrap.querySelector(".button-strip");
-  confidenceChoicesForMock().forEach((choice) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `tag-button ${state.currentConfidenceKey === choice.key ? "active" : ""}`;
-    button.textContent = choice.label;
-    button.addEventListener("click", () => setDrillConfidence(choice.key));
-    strip.appendChild(button);
-  });
-}
-
 function renderCurrentContrastiveBox() {
   const wrap = els["contrastive-box"];
   const current = state.currentContrastiveItem;
@@ -2226,13 +2259,6 @@ function renderCurrentContrastiveBox() {
     <div>${escapeHtml(current.reason || "混同対比キューから投入")}</div>
     <div class="muted">${source ? `${source.id} | ${escapeHtml(shortSnippet(source.prompt, 84))}` : "直近の混同ファミリーから選抜"}</div>
   `;
-}
-
-function setDrillConfidence(key) {
-  if (state.currentQuestionLocked) return;
-  state.currentConfidenceKey = key;
-  renderDrillConfidenceBox();
-  updateDrillSubmitDisabled();
 }
 
 function toggleSelection(choiceId) {
@@ -2253,7 +2279,7 @@ function toggleSelection(choiceId) {
 }
 
 function updateDrillSubmitDisabled() {
-  els["submit-answer"].disabled = state.currentQuestionLocked || state.currentSelections.length === 0 || !state.currentConfidenceKey;
+  els["submit-answer"].disabled = state.currentQuestionLocked || state.currentSelections.length === 0;
 }
 
 function revealHint() {
@@ -2288,12 +2314,12 @@ function revealHint() {
 
 function submitCurrentQuestion() {
   const question = questionById(state.currentQuestionId);
-  if (!question || state.currentQuestionLocked || !state.currentConfidenceKey) return;
+  if (!question || state.currentQuestionLocked) return;
 
   const userIds = [...state.currentSelections].sort();
   const correctIds = [...question.correct_choice_ids].sort();
   const correct = JSON.stringify(userIds) === JSON.stringify(correctIds);
-  const update = applyAdaptiveUpdate(question, correct, userIds, state.currentConfidenceKey);
+  const update = applyAdaptiveUpdate(question, correct, userIds);
 
   document.querySelectorAll("#question-card .choice-button").forEach((button) => {
     const choiceId = button.dataset.choiceId;
@@ -2311,15 +2337,13 @@ function submitCurrentQuestion() {
     ? `対比キュー追加: ${update.queued.map((item) => item.id).join(" / ")}`
     : "対比キュー追加なし";
   const coach = correct
-    ? update.confidenceKey === "guess"
-      ? "正解だが、当てただけなら定着ではない。近接論点で境界を固める。"
+    ? update.hintsUsed > 0
+      ? "正解だが、ヒント依存なら定着は甘い。近接論点で境界を固めろ。"
       : "正解。理由を言語化して再現性に変えろ。"
-    : update.confidenceKey === "confident"
-      ? "不正解。自信ありで落とした論点は優先矯正だ。"
-      : "不正解。曖昧なまま進むな。選択肢の切り分けを作り直せ。";
+    : "不正解。曖昧なまま進むな。選択肢の切り分けを作り直せ。";
 
   const resultHtml = `
-    <strong>${correct ? "正解" : "不正解"} | 正答 ${correctIds.join(",")} | ${confidenceLabel(update.confidenceKey, correct)}</strong>
+    <strong>${correct ? "正解" : "不正解"} | 正答 ${correctIds.join(",")}</strong>
     <div>${coach}</div>
     <div>モデル更新: 再現率予測 ${Math.round(update.before.predictedRecall * 100)}% → ${Math.round(update.after.predictedRecall * 100)}%</div>
     <div>記憶半減期: ${update.before.halfLifeHours.toFixed(1)}h → ${update.record.halfLifeHours.toFixed(1)}h | 次回推奨 ${nextReview.toFixed(1)}h後</div>
@@ -2366,7 +2390,6 @@ function applyLockedDrillFeedback(question) {
   els["result-box"].className = `result-box ${feedback.resultClass}`;
   els["result-box"].classList.remove("hidden");
   els["result-box"].innerHTML = feedback.resultHtml;
-  renderDrillConfidenceBox();
   els["hint-button"].disabled = true;
   els["submit-answer"].disabled = true;
   els["next-question"].disabled = false;
@@ -2482,10 +2505,10 @@ function ensureMockAnswer(questionId) {
   if (!session.answers[questionId]) {
     session.answers[questionId] = {
       selectedIds: [],
-      confidenceKey: null,
       touchedAt: null,
       savedAt: null,
       changeCount: 0,
+      countedDayKey: null,
     };
   }
   return session.answers[questionId];
@@ -2501,7 +2524,6 @@ function renderMock() {
     els["mock-strategy-strip"].innerHTML = "";
     els["mock-question"].className = "question-card empty";
     els["mock-question"].innerHTML = "<p>模試を開始しろ。</p>";
-    els["mock-confidence-box"].classList.add("hidden");
     els["mock-results"].innerHTML = "<p>模試を完了するとここに結果が出る。</p>";
     setMockButtonsDisabled(true);
     return;
@@ -2518,18 +2540,16 @@ function renderMock() {
   const question = questionById(currentId);
   const savedAnswer = session.answers[currentId] || {
     selectedIds: [],
-    confidenceKey: null,
   };
   renderMockQuestion(question, savedAnswer.selectedIds);
-  renderMockConfidenceBox(savedAnswer.confidenceKey, session.finished);
   renderMockStrategyStrip(session);
 
   const answered = Object.values(session.answers).filter((answer) => answer.selectedIds.length > 0).length;
-  const confident = Object.values(session.answers).filter((answer) => answer.confidenceKey === "confident").length;
+  const changedHeavy = Object.values(session.answers).filter((answer) => (answer.changeCount || 0) >= 3).length;
   els["mock-progress"].innerHTML = `
     <span class="pill">${session.currentIndex + 1} / ${session.questionIds.length}</span>
     <span class="pill">回答済み ${answered}</span>
-    <span class="pill">自信あり ${confident}</span>
+    <span class="pill">見直し多め ${changedHeavy}</span>
     <span class="pill">${question.domain_label_ja}</span>
   `;
 
@@ -2584,41 +2604,19 @@ function renderMockQuestion(question, savedAnswer) {
   els["mock-question"] = wrap;
 }
 
-function renderMockConfidenceBox(confidenceKey, disabled = false) {
-  const wrap = els["mock-confidence-box"];
-  wrap.className = "confidence-box";
-  wrap.classList.remove("hidden", "locked");
-  if (disabled) wrap.classList.add("locked");
-  wrap.innerHTML = `
-    <strong>本番想定の手応え</strong>
-    <div class="button-strip"></div>
-    <div class="muted">mock analytics で confident-wrong / slump / multi-select misses を見る。</div>
-  `;
-  const strip = wrap.querySelector(".button-strip");
-  confidenceChoicesForMock().forEach((choice) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `tag-button ${confidenceKey === choice.key ? "active" : ""}`;
-    button.textContent = choice.label;
-    button.disabled = disabled;
-    button.addEventListener("click", () => setMockConfidence(choice.key));
-    strip.appendChild(button);
-  });
-}
-
 function renderMockStrategyStrip(session) {
   const answered = Object.values(session.answers).filter((answer) => answer.selectedIds.length > 0).length;
-  const withConfidence = Object.values(session.answers).filter((answer) => Boolean(answer.confidenceKey)).length;
   const multiSelectAnswered = session.questionIds.filter((questionId) => {
     const question = questionById(questionId);
     return question.multi_select && (session.answers[questionId]?.selectedIds.length || 0) > 0;
   }).length;
+  const changedHeavy = Object.values(session.answers).filter((answer) => (answer.changeCount || 0) >= 3).length;
   const lateWindowStart = new Date(new Date(session.endsAt).getTime() - 20 * 60 * 1000);
   const lateTouched = Object.values(session.answers).filter((answer) => answer.savedAt && new Date(answer.savedAt) >= lateWindowStart).length;
 
   els["mock-strategy-strip"].innerHTML = `
-    <span class="pill">自信度入力 ${withConfidence}</span>
     <span class="pill">multi-select 着手 ${multiSelectAnswered}</span>
+    <span class="pill">見直し多め ${changedHeavy}</span>
     <span class="pill">${lateTouched ? `終盤20分回答 ${lateTouched}` : "終盤20分は未到達"}</span>
     <span class="pill">残り未回答 ${session.questionIds.length - answered}</span>
   `;
@@ -2649,29 +2647,25 @@ function toggleMockSelection(choiceId, chooseCount) {
   renderMockStrategyStrip(session);
 }
 
-function setMockConfidence(key) {
-  const session = currentMockSession();
-  if (!session || session.finished) return;
-  const currentId = session.questionIds[session.currentIndex];
-  const answer = ensureMockAnswer(currentId);
-  answer.confidenceKey = key;
-  answer.touchedAt = nowIso();
-  saveUserState();
-  renderMockConfidenceBox(key, false);
-  renderMockStrategyStrip(session);
-}
-
 function saveMockAnswer() {
   const session = currentMockSession();
   if (!session || session.finished) return;
   const currentId = session.questionIds[session.currentIndex];
   const answer = ensureMockAnswer(currentId);
   answer.savedAt = nowIso();
+  if ((answer.selectedIds || []).length > 0 && answer.countedDayKey !== localDayKey()) {
+    recordDailyProgress({
+      questionId: currentId,
+      kind: "mock",
+      correct: null,
+      wasReview: attemptRecord(currentId).total > 0,
+    });
+    answer.countedDayKey = localDayKey();
+  }
   saveUserState();
   shadowLog("mock_answer_saved", {
     questionId: currentId,
     selectedCount: answer.selectedIds.length,
-    confidenceKey: answer.confidenceKey,
     index: session.currentIndex + 1,
   });
   moveMock(1);
@@ -2696,8 +2690,8 @@ function finishMock() {
   renderMock();
   shadowLog("mock_finished", {
     score: session.summary.score,
-    confidentWrong: session.summary.confidentWrong,
     multiSelectMisses: session.summary.multiSelectMisses,
+    highChangeAnswers: session.summary.highChangeAnswers,
     slumpDelta: session.summary.slumpDelta,
   });
 }
@@ -2706,10 +2700,9 @@ function computeMockSummary(session) {
   let correct = 0;
   const byDomain = {};
   let unanswered = 0;
-  let confidentWrong = 0;
-  let lowConfidenceHits = 0;
   let multiSelectMisses = 0;
   let wrongCardinality = 0;
+  let highChangeAnswers = 0;
   let lateCorrect = 0;
   let lateTotal = 0;
   let earlyCorrect = 0;
@@ -2740,8 +2733,7 @@ function computeMockSummary(session) {
       multiSelectMisses += 1;
       if (selected.length !== question.choose_count) wrongCardinality += 1;
     }
-    if (!isCorrect && answer.confidenceKey === "confident") confidentWrong += 1;
-    if (isCorrect && (answer.confidenceKey === "guess" || answer.confidenceKey === "unsure")) lowConfidenceHits += 1;
+    if ((answer.changeCount || 0) >= 3) highChangeAnswers += 1;
 
     const answerTime = answer.savedAt || answer.touchedAt;
     if (answerTime) {
@@ -2768,8 +2760,8 @@ function computeMockSummary(session) {
   if (multiSelectMisses >= 4) {
     recommendations.push(`複数選択 ${multiSelectMisses}問を落としている。まず正答数 ${wrongCardinality}件の外しを止めろ。`);
   }
-  if (confidentWrong >= 4) {
-    recommendations.push(`自信ありで ${confidentWrong}問落としている。見慣れた用語で雑に決め打ちしている。`);
+  if (highChangeAnswers >= 6) {
+    recommendations.push(`見直し往復が ${highChangeAnswers}問ある。消去基準が弱い証拠だ。用語の境界を作り直せ。`);
   }
   if (slumpDelta != null && slumpDelta < -0.12) {
     recommendations.push(`終盤20分で精度が ${Math.round(Math.abs(slumpDelta) * 100)}pt 落ちた。残り25分時点で multi-select を先に回せ。`);
@@ -2785,10 +2777,9 @@ function computeMockSummary(session) {
     total: session.questionIds.length,
     weakest,
     unanswered,
-    confidentWrong,
-    lowConfidenceHits,
     multiSelectMisses,
     wrongCardinality,
+    highChangeAnswers,
     lateCorrect,
     lateTotal,
     earlyCorrect,
@@ -2814,7 +2805,7 @@ function renderMockResults() {
       <div>${summary.correct} / ${summary.total} 問正解</div>
       <div>弱点: ${summary.weakest.map((item) => `${item.label} ${Math.round((item.correct / item.total) * 100)}%`).join(" / ")}</div>
       <div>multi-select misses: ${summary.multiSelectMisses}問 | 選択数ミス ${summary.wrongCardinality}件</div>
-      <div>confident-wrong: ${summary.confidentWrong}問 | low-confidence hit: ${summary.lowConfidenceHits}問</div>
+      <div>見直し多発: ${summary.highChangeAnswers}問</div>
       <div>last-20-minute slump: ${lateLine}</div>
       <div>未回答: ${summary.unanswered}問</div>
       <div class="mini-stack">

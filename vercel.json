@@ -1,0 +1,30 @@
+{
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [
+    {
+      "source": "/api/official-docs",
+      "destination": "/api/official-docs"
+    },
+    {
+      "source": "/data/:path*",
+      "destination": "/docs/data/:path*"
+    },
+    {
+      "source": "/app.js",
+      "destination": "/docs/app.js"
+    },
+    {
+      "source": "/styles.css",
+      "destination": "/docs/styles.css"
+    },
+    {
+      "source": "/favicon.ico",
+      "destination": "/docs/favicon.ico"
+    },
+    {
+      "source": "/:path*",
+      "destination": "/docs/:path*"
+    }
+  ]
+}

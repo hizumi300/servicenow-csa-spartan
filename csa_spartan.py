@@ -3232,7 +3232,6 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "submitted_at",
                 "selected_choice_ids",
                 "is_correct",
-                "confidence_label",
                 "hint_count",
                 "predicted_recall_before",
                 "predicted_recall_after",
@@ -3240,6 +3239,7 @@ def build_curated_payload(payload: Dict[str, object], count: int, days: int, dai
                 "knowledge_prob_after",
                 "bandit_reward",
                 "working_set_size",
+                "question_source",
             ],
         },
         "shadow_model": (
@@ -3360,7 +3360,7 @@ def build_shadow_attempts(events: Sequence[Dict[str, object]], curated: Dict[str
                 "question_id": question_id,
                 "question_index": question["curated_index"] - 1,
                 "correct": 1 if event.get("correct") else 0,
-                "confidence_key": event.get("confidenceKey") or "unsure",
+                "hints_used": int(event.get("hintsUsed") or 0),
                 "timestamp": timestamp,
                 "domain_key": question["domain_key"],
                 "confusion_family": question.get("confusion_family"),
@@ -3390,16 +3390,32 @@ def segment_shadow_sequences(attempts: Sequence[Dict[str, object]], gap_hours: f
 
 
 def sliding_windows(sequence: Sequence[Dict[str, object]], window: int) -> List[List[Dict[str, object]]]:
-    if len(sequence) <= window:
-        return [list(sequence)]
-    stride = max(2, window // 2)
+    length = len(sequence)
+    if length < 3:
+        return []
+    if length <= window:
+        min_chunk = min(length, max(4, min(window, 6)))
+        step = 1 if length <= 8 else 2
+        windows: List[List[Dict[str, object]]] = []
+        for end in range(min_chunk, length + 1, step):
+            chunk = list(sequence[:end])
+            if len(chunk) >= 3:
+                windows.append(chunk)
+        full = list(sequence)
+        if not windows or windows[-1] != full:
+            windows.append(full)
+        return windows
+    stride = max(1, window // 3)
     windows: List[List[Dict[str, object]]] = []
-    for start in range(0, len(sequence) - 1, stride):
+    for start in range(0, length - 1, stride):
         chunk = list(sequence[start : start + window])
         if len(chunk) >= 3:
             windows.append(chunk)
-        if start + window >= len(sequence):
+        if start + window >= length:
             break
+    tail = list(sequence[-window:])
+    if len(tail) >= 3 and (not windows or windows[-1] != tail):
+        windows.append(tail)
     return windows
 
 
@@ -3427,6 +3443,21 @@ def sequence_examples(sequences: Sequence[List[Dict[str, object]]], window: int)
                 }
             )
     return examples
+
+
+def split_shadow_examples(
+    examples: Sequence[Dict[str, object]],
+    *,
+    min_valid_examples: int = 6,
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    ordered = list(examples)
+    if len(ordered) <= 3:
+        return ordered, ordered
+    valid_count = max(min_valid_examples, math.ceil(len(ordered) * 0.2))
+    valid_count = min(valid_count, len(ordered) - 2)
+    valid_count = max(2, valid_count)
+    cut = max(1, len(ordered) - valid_count)
+    return ordered[:cut], ordered[cut:]
 
 
 def batch_examples(examples: Sequence[Dict[str, object]], batch_size: int) -> List[List[Dict[str, object]]]:
@@ -3777,6 +3808,11 @@ def run_shadow_training(
     train_sequences, valid_sequences = split_shadow_sequences(sequences)
     train_examples = sequence_examples(train_sequences, window)
     valid_examples = sequence_examples(valid_sequences, window)
+    split_strategy = "sequence_holdout"
+    if len(valid_examples) < 6:
+        all_examples = sequence_examples(sequences, window)
+        train_examples, valid_examples = split_shadow_examples(all_examples, min_valid_examples=6)
+        split_strategy = "example_holdout_fallback"
     if not train_examples or not valid_examples:
         raise SystemExit("Shadow Deep KT を学習するには、最低でも連続した回答ログが3件以上必要です。")
 
@@ -3805,6 +3841,7 @@ def run_shadow_training(
             "sequences": len(sequences),
             "train_examples": len(train_examples),
             "valid_examples": len(valid_examples),
+            "split_strategy": split_strategy,
         },
         "models": serializable_models,
         "champion": champion["model"],
@@ -3872,6 +3909,15 @@ def cmd_web_build(args: argparse.Namespace) -> None:
     payload = build_dataset(Path(args.source).expanduser(), force=args.force)
     curated = build_curated_payload(payload, count=args.count, days=args.days, daily_hours=args.daily_hours)
     save_curated_payload(curated)
+    synthetic_seed = SHADOW_DIR / "synthetic-seed.jsonl"
+    if synthetic_seed.exists():
+        try:
+            run_shadow_training(curated, [synthetic_seed], epochs=8, hidden_size=48, window=12, batch_size=8)
+        except SystemExit:
+            pass
+        else:
+            curated = build_curated_payload(payload, count=args.count, days=args.days, daily_hours=args.daily_hours)
+            save_curated_payload(curated)
     export_web_data(curated)
     print(f"Exported: {WEB_DATA_PATH}")
     print(f"Questions: {curated['meta']['curated_count']}")

@@ -385,51 +385,22 @@ select {
   opacity: 0.52;
 }
 
+.stat-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .hint-box,
 .result-box,
 .today-box,
 .preview-card,
 .plan-card,
-.mock-card,
-.confidence-box {
+.mock-card {
   border-radius: 18px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.72);
   padding: 16px 18px;
-}
-
-.confidence-box.locked {
-  background: rgba(255, 248, 239, 0.82);
-}
-
-.button-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin: 12px 0 8px;
-}
-
-.tag-button {
-  padding: 10px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.78);
-  cursor: pointer;
-  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
-}
-
-.tag-button:hover {
-  transform: translateY(-1px);
-}
-
-.tag-button.active {
-  border-color: rgba(181, 72, 35, 0.42);
-  background: rgba(242, 193, 156, 0.34);
-}
-
-.tag-button:disabled {
-  cursor: default;
-  opacity: 0.72;
 }
 
 .concept-stack {
